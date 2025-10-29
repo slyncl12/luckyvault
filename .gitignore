@@ -1,0 +1,26 @@
+# Dependencies
+node_modules/
+frontend/node_modules/
+
+# Build outputs
+frontend/dist/
+frontend/.vercel/
+
+# Environment files
+.env
+.env.local
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Sui
+.sui/
+
+# Logs
+*.log
+npm-debug.log*
