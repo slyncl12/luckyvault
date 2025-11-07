@@ -1,0 +1,19 @@
+{
+  "name": "luckyvault-keeper",
+  "version": "1.0.0",
+  "description": "LuckyVault pool rebalancing keeper",
+  "type": "module",
+  "main": "index.ts",
+  "scripts": {
+    "start": "tsx index.ts",
+    "dev": "tsx watch index.ts"
+  },
+  "dependencies": {
+    "@mysten/sui": "^1.42.0",
+    "@suilend/sdk": "^1.1.91",
+    "dotenv": "^17.2.3"
+  },
+  "devDependencies": {
+    "tsx": "^4.20.6"
+  }
+}

@@ -1,0 +1,9 @@
+[package]
+name = "test_usdc"
+edition = "2024.beta"
+
+[dependencies]
+Sui = { git = "https://github.com/MystenLabs/sui.git", subdir = "crates/sui-framework/packages/sui-framework", rev = "4e8b6eda7d6411d80c62f39ac8a4f028e8d174c4" }
+
+[addresses]
+test_usdc = "0xd720015090ae50529738f07b245de5b9f8fb56b07e674b61a8bfa4c147f06d1b"

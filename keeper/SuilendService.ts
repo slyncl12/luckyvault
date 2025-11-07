@@ -1,0 +1,460 @@
+/**
+ * Suilend Integration Service
+ * Handles all interactions with Suilend protocol for LuckyVault
+ */
+
+import { SuilendClient, LENDING_MARKET_ID, LENDING_MARKET_TYPE } from '@suilend/sdk';
+import { SuiClient } from '@mysten/sui/client';
+import { Transaction } from '@mysten/sui/transactions';
+
+// Constants
+const USDC_COIN_TYPE = '0x5d4b302506645c37ff133b98c4b50a5ae14841659738d6d733d59d0d217a93bf::coin::COIN';
+const SUI_RPC_URL = 'https://fullnode.mainnet.sui.io';
+
+export interface SuilendPosition {
+  depositedAmount: string; // In USDC base units (6 decimals)
+  currentValue: string;    // Including yield
+  yieldEarned: string;     // Yield only
+  obligationId: string;
+}
+
+export interface ReserveStats {
+  supplyAPY: number;       // Annual percentage yield for suppliers
+  borrowAPY: number;       // Annual percentage yield for borrowers
+  totalDeposits: string;   // Total USDC deposited in reserve
+  totalBorrows: string;    // Total USDC borrowed
+  utilizationRate: number; // Percentage of deposits being borrowed
+}
+
+export class SuilendService {
+  private suiClient: SuiClient;
+  private suilendClient: SuilendClient | null = null;
+  private initialized: boolean = false;
+
+  constructor() {
+    this.suiClient = new SuiClient({ url: SUI_RPC_URL });
+  }
+
+  /**
+   * Initialize the Suilend client
+   */
+  async initialize(): Promise<void> {
+    if (this.initialized) return;
+
+    try {
+      this.suilendClient = await SuilendClient.initialize(
+        LENDING_MARKET_ID,
+        LENDING_MARKET_TYPE,
+        this.suiClient,
+        false // Don't log package ID
+      );
+      this.initialized = true;
+      console.log('✅ Suilend client initialized');
+    // Log current APY
+      try {
+        const apy = await this.getUSDCSupplyAPY();
+        console.log(`   Current USDC Supply APY: ${apy.toFixed(2)}%`);
+      } catch (error) {
+        console.error('❌ FAILED TO GET APY:', error);
+        throw error; // Re-throw to stop the keeper
+      }
+    } catch (error) {
+      console.error('❌ Failed to initialize Suilend client:', error);
+      throw error;
+    }
+  }
+
+  /**
+   * Get current USDC supply APY from Suilend
+   * Returns the APY as a percentage (e.g., 12.5 for 12.5%)
+   */
+
+async getUSDCSupplyAPY(): Promise<number> {
+    await this.ensureInitialized();
+    
+    // Note: Calculating exact real-time APY requires compounding accrued interest
+    // which matches Suilend's frontend calculations. For now, we use our calculation
+    // based on current reserve state, which gives a conservative estimate.
+    
+    const usdcReserveIndex = this.suilendClient!.findReserveArrayIndex(USDC_COIN_TYPE);
+    const reserve = this.suilendClient!.lendingMarket.reserves[Number(usdcReserveIndex)];
+    
+    if (!reserve) throw new Error('❌ USDC reserve not found');
+    
+    const mintDecimals = reserve.mintDecimals;
+    const availableAmount = Number(reserve.availableAmount) / (10 ** mintDecimals);
+    const borrowedAmount = (Number(reserve.borrowedAmount.value) / 1e18) / (10 ** mintDecimals);
+    const depositedAmount = borrowedAmount + availableAmount;
+    const utilizationPercent = depositedAmount === 0 ? 0 : (borrowedAmount / depositedAmount) * 100;
+    
+    const config = reserve.config.element;
+    const interestRateUtils = config.interestRateUtils;
+    const interestRateAprs = config.interestRateAprs.map((apr: any) => Number(apr) / 100);
+    
+    let borrowAprPercent = interestRateAprs[0];
+    for (let i = 0; i < interestRateUtils.length - 1; i++) {
+      const u1 = Number(interestRateUtils[i]);
+      const u2 = Number(interestRateUtils[i + 1]);
+      if (utilizationPercent >= u1 && utilizationPercent <= u2) {
+        const slope = (interestRateAprs[i + 1] - interestRateAprs[i]) / (u2 - u1);
+        borrowAprPercent = interestRateAprs[i] + slope * (utilizationPercent - u1);
+        break;
+      }
+    }
+    
+    const spreadFeeBps = Number(config.spreadFeeBps);
+    const supplyAprPercent = (utilizationPercent / 100) * (borrowAprPercent / 100) * (1 - spreadFeeBps / 10000) * 100;
+    
+    console.log(`   📊 Current Supply APR: ${supplyAprPercent.toFixed(2)}% (based on reserve state)`);
+    console.log(`   ℹ️  Note: Suilend frontend may show different value due to compounded interest`);
+    
+    return supplyAprPercent;
+  }
+
+
+
+  /**
+   * Get detailed reserve statistics for USDC
+   */
+  async getUSDCReserveStats(): Promise<ReserveStats> {
+    await this.ensureInitialized();
+
+    try {
+      const lendingMarket = this.suilendClient!.lendingMarket;
+      const usdcReserveIndex = this.suilendClient!.findReserveArrayIndex(USDC_COIN_TYPE);
+      const usdcReserve = lendingMarket.reserves[Number(usdcReserveIndex)];
+
+      if (!usdcReserve) {
+        throw new Error('USDC reserve not found');
+      }
+
+      const supplyAPR = this.calculateSupplyAPR(usdcReserve);
+      const borrowAPR = this.calculateBorrowAPR(usdcReserve);
+
+      // Get total deposits and borrows (in base units)
+      const totalDeposits = usdcReserve.availableAmount + usdcReserve.borrowedAmount;
+      const utilizationRate = totalDeposits > 0 
+        ? (Number(usdcReserve.borrowedAmount) / Number(totalDeposits)) * 100 
+        : 0;
+
+      return {
+        supplyAPY: this.aprToApy(supplyAPR),
+        borrowAPY: this.aprToApy(borrowAPR),
+        totalDeposits: totalDeposits.toString(),
+        totalBorrows: usdcReserve.borrowedAmount.toString(),
+        utilizationRate
+      };
+    } catch (error) {
+      console.error('❌ Error fetching reserve stats:', error);
+      return {
+        supplyAPY: 0,
+        borrowAPY: 0,
+        totalDeposits: '0',
+        totalBorrows: '0',
+        utilizationRate: 0
+      };
+    }
+  }
+
+  /**
+   * Create a new Suilend obligation for a user
+   * This should be called once per user before they can deposit
+   */
+  async createObligation(userAddress: string): Promise<{ tx: Transaction; obligationOwnerCap: any }> {
+    await this.ensureInitialized();
+
+    const tx = new Transaction();
+    const obligationOwnerCap = this.suilendClient!.createObligation(tx);
+
+    return { tx, obligationOwnerCap };
+  }
+
+  /**
+   * Check if user has an existing obligation
+   */
+  async getUserObligation(userAddress: string): Promise<string | null> {
+    await this.ensureInitialized();
+
+    try {
+      const obligationCaps = await SuilendClient.getObligationOwnerCaps(
+        userAddress,
+        [LENDING_MARKET_TYPE],
+        this.suiClient
+      );
+
+      if (obligationCaps.length > 0) {
+        return obligationCaps[0].obligationId;
+      }
+
+      return null;
+    } catch (error) {
+      console.error('❌ Error checking user obligation:', error);
+      return null;
+    }
+  }
+
+  /**
+   * Deposit USDC into Suilend
+   * Returns a transaction that deposits USDC and creates/updates obligation
+   */
+  async depositUSDC(
+    userAddress: string,
+    amountUSDC: number, // Amount in USDC (e.g., 10 = 10 USDC)
+    obligationOwnerCapId?: string
+  ): Promise<Transaction> {
+    await this.ensureInitialized();
+
+    const tx = new Transaction();
+    
+    // Convert USDC amount to base units (6 decimals)
+    const amountInBaseUnits = Math.floor(amountUSDC * 1_000_000).toString();
+
+    // Check if user has an obligation
+    const existingObligationId = await this.getUserObligation(userAddress);
+
+    if (!existingObligationId && !obligationOwnerCapId) {
+      // Create new obligation first
+      const { obligationOwnerCap } = await this.createObligation(userAddress);
+      obligationOwnerCapId = obligationOwnerCap;
+    }
+
+    // Deposit into obligation
+    await this.suilendClient!.depositIntoObligation(
+      userAddress,
+      USDC_COIN_TYPE,
+      amountInBaseUnits,
+      tx,
+      obligationOwnerCapId || existingObligationId!
+    );
+
+    return tx;
+  }
+
+  /**
+   * Withdraw USDC from Suilend
+   */
+  async withdrawUSDC(
+    userAddress: string,
+    amountUSDC: number, // Amount in USDC
+    obligationId: string
+  ): Promise<Transaction> {
+    await this.ensureInitialized();
+
+    const tx = new Transaction();
+    
+    // Convert USDC amount to base units
+    const amountInBaseUnits = Math.floor(amountUSDC * 1_000_000).toString();
+
+    // Get obligation owner cap
+    const obligationCaps = await SuilendClient.getObligationOwnerCaps(
+      userAddress,
+      [LENDING_MARKET_TYPE],
+      this.suiClient
+    );
+
+    if (obligationCaps.length === 0) {
+      throw new Error('No obligation found for user');
+    }
+
+    const obligationOwnerCapId = obligationCaps[0].id;
+
+    // Get the obligation to refresh it
+    const obligation = await SuilendClient.getObligation(
+      obligationId,
+      [LENDING_MARKET_TYPE],
+      this.suiClient
+    );
+
+    // Refresh obligation state
+    await this.suilendClient!.refreshAll(tx, obligation);
+
+    // Withdraw and send to user
+    await this.suilendClient!.withdrawAndSendToUser(
+      userAddress,
+      obligationOwnerCapId,
+      obligationId,
+      USDC_COIN_TYPE,
+      amountInBaseUnits,
+      tx
+    );
+
+    return tx;
+  }
+
+  /**
+   * Get user's current position in Suilend
+   */
+  async getUserPosition(userAddress: string): Promise<SuilendPosition | null> {
+    await this.ensureInitialized();
+
+    try {
+      const obligationId = await this.getUserObligation(userAddress);
+      
+      if (!obligationId) {
+        return null;
+      }
+
+      const obligation = await SuilendClient.getObligation(
+        obligationId,
+        [LENDING_MARKET_TYPE],
+        this.suiClient
+      );
+
+      // Find USDC deposit in the obligation
+      const usdcReserveIndex = this.suilendClient!.findReserveArrayIndex(USDC_COIN_TYPE);
+      const deposit = obligation.deposits.find(
+        d => d.reserveArrayIndex === usdcReserveIndex
+      );
+
+      if (!deposit) {
+        return {
+          depositedAmount: '0',
+          currentValue: '0',
+          yieldEarned: '0',
+          obligationId
+        };
+      }
+
+      // Calculate current value including yield
+      // The deposit object contains the market value
+      const depositedAmount = deposit.depositedAmount;
+      const currentValue = deposit.marketValue;
+      const yieldEarned = BigInt(currentValue) - BigInt(depositedAmount);
+
+      return {
+        depositedAmount: depositedAmount.toString(),
+        currentValue: currentValue.toString(),
+        yieldEarned: yieldEarned.toString(),
+        obligationId
+      };
+    } catch (error) {
+      console.error('❌ Error fetching user position:', error);
+      return null;
+    }
+  }
+
+  /**
+   * Format USDC amount from base units to human-readable
+   */
+  formatUSDC(amount: string): string {
+    const value = Number(amount) / 1_000_000;
+    return value.toFixed(2);
+  }
+
+  /**
+   * Calculate supply APR from reserve data
+   */
+  private calculateSupplyAPR(reserve: any): number {
+    // Suilend stores interest rates as per-second rates
+    // Convert to APR (Annual Percentage Rate)
+    const supplyRatePerSecond = Number(reserve.config.interestRateConfig.supplyRatePerSecond || 0);
+    const secondsPerYear = 365 * 24 * 60 * 60;
+    const apr = supplyRatePerSecond * secondsPerYear * 100;
+    return apr;
+  }
+
+  /**
+   * Calculate borrow APR from reserve data
+   */
+  private calculateBorrowAPR(reserve: any): number {
+    const borrowRatePerSecond = Number(reserve.config.interestRateConfig.borrowRatePerSecond || 0);
+    const secondsPerYear = 365 * 24 * 60 * 60;
+    const apr = borrowRatePerSecond * secondsPerYear * 100;
+    return apr;
+  }
+
+  /**
+   * Convert APR to APY (accounting for daily compounding)
+   */
+  private aprToApy(apr: number): number {
+    // APY = (1 + APR/n)^n - 1, where n = compounding periods per year
+    // For daily compounding: n = 365
+    const n = 365;
+    const apy = (Math.pow(1 + (apr / 100) / n, n) - 1) * 100;
+    return apy;
+  }
+
+  /**
+   * Ensure the client is initialized before operations
+   */
+  private async ensureInitialized(): Promise<void> {
+    if (!this.initialized) {
+      await this.initialize();
+    }
+  }
+
+async depositToSuilend(
+    keypair: Ed25519Keypair,
+    usdcCoinId: string,
+    amount: number
+  ): Promise<any> {
+    try {
+      const tx = new Transaction();
+      const walletAddress = keypair.toSuiAddress();
+      
+      console.log('Depositing to Suilend using depositLiquidityAndGetCTokens...');
+      
+      // This method just deposits and returns cTokens (receipt tokens)
+      await this.suilendClient.depositLiquidityAndGetCTokens(
+        walletAddress,
+        '0xdba34672e30cb065b1f93e3ab55318768fd6fef66c15942c9f7cb846e2f900e7::usdc::USDC',
+        amount.toString(),
+        tx
+      );
+      
+      // Sign and execute the transaction
+      const txResult = await this.suiClient.signAndExecuteTransaction({
+        transaction: tx,
+        signer: keypair,
+        options: {
+          showEffects: true,
+          showObjectChanges: true,
+        },
+      });
+      
+      console.log('✅ Deposited to Suilend successfully!');
+      console.log('   Transaction:', txResult.digest);
+      
+      return txResult;
+    } catch (error) {
+      console.error('Error in depositToSuilend:', error);
+      throw error;
+    }
+  }
+
+}
+// Export singleton instance
+export const suilendService = new SuilendService();
+
+// Example usage:
+/*
+// Initialize
+await suilendService.initialize();
+
+// Get current APY
+const apy = await suilendService.getUSDCSupplyAPY();
+console.log(`Current USDC APY: ${apy.toFixed(2)}%`);
+
+// Get detailed stats
+const stats = await suilendService.getUSDCReserveStats();
+console.log('Reserve Stats:', stats);
+
+// Create obligation and deposit
+const { tx, obligationOwnerCap } = await suilendService.createObligation(userAddress);
+// ... execute tx first ...
+
+const depositTx = await suilendService.depositUSDC(userAddress, 100); // Deposit 100 USDC
+// ... execute depositTx ...
+
+// Get user position
+const position = await suilendService.getUserPosition(userAddress);
+console.log('User Position:', position);
+
+// Withdraw
+const withdrawTx = await suilendService.withdrawUSDC(
+  userAddress,
+  50, // Withdraw 50 USDC
+  position.obligationId
+);
+// ... execute withdrawTx ...
+*/

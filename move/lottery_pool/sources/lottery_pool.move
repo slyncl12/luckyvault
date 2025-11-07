@@ -1,66 +1,90 @@
 module lottery_pool::lottery_pool {
     use sui::coin::{Self, Coin};
     use sui::balance::{Self, Balance};
-    use sui::sui::SUI;
     use sui::vec_map::{Self, VecMap};
     use sui::event;
-    
+    use sui::random::{Self, Random};
+    use test_usdc::usdc::USDC;    
     // Errors
     const EInsufficientBalance: u64 = 0;
     const ENotOwner: u64 = 1;
     const ENoParticipants: u64 = 2;
-    const ENotAuthorized: u64 = 3;
     const EMinimumDeposit: u64 = 4;
+    const EInsufficientYield: u64 = 5;
     
     // Constants
-    const MIN_DEPOSIT: u64 = 100_000_000; // 0.1 SUI minimum
+    const MIN_DEPOSIT: u64 = 100_000; // 0.1 USDC (6 decimals)
     
-    /// Admin capability - only holder can draw winners
+    /// Admin capability
     public struct AdminCap has key, store {
         id: UID,
     }
     
-    /// The main lottery pool
+    /// The lottery pool tracking USDC and Suilend obligations
     public struct LotteryPool has key {
         id: UID,
-        total_deposits: u64,
-        balance: Balance<SUI>,
-        participants: VecMap<address, u64>,
+        usdc_deposits: Balance<USDC>,         // Temporary USDC before Suilend
+        yield_balance: Balance<USDC>,         // Yield for prizes
+        participants: VecMap<address, u64>,   // User -> USDC amount
+        suilend_obligations: VecMap<address, vector<u8>>, // User -> obligation ID
+        total_deposited: u64,
+        total_yield_earned: u64,
         total_tickets: u64,
         admin: address,
     }
     
-    /// A ticket that proves deposit
+       
+    /// A ticket proving deposit
     public struct Ticket has key, store {
         id: UID,
-        amount: u64,
+        amount_usdc: u64,
         pool_id: address,
         owner: address,
+        suilend_obligation_id: vector<u8>, // For transparency
     }
     
-    /// Event emitted when someone deposits
+    /// Events
     public struct DepositEvent has copy, drop {
         depositor: address,
-        amount: u64,
-        tickets: u64,
+        amount_usdc: u64,
+        pool_id: address,
+        timestamp: u64,
     }
     
-    /// Event emitted when winner is selected
+    public struct SuilendDepositEvent has copy, drop {
+        depositor: address,
+        amount_usdc: u64,
+        obligation_id: vector<u8>,
+    }
+    
+    public struct WithdrawEvent has copy, drop {
+        withdrawer: address,
+        amount_usdc: u64,
+    }
+    
     public struct WinnerEvent has copy, drop {
         winner: address,
-        prize: u64,
+        prize_usdc: u64,
         draw_time: u64,
     }
     
-    /// Create the lottery pool with admin capability
+    public struct YieldAddedEvent has copy, drop {
+        amount: u64,
+        total_yield: u64,
+    }
+    
+    /// Create pool
     public fun create_pool(ctx: &mut TxContext) {
         let admin = tx_context::sender(ctx);
         
         let pool = LotteryPool {
             id: object::new(ctx),
-            total_deposits: 0,
-            balance: balance::zero(),
+            usdc_deposits: balance::zero(),
+            yield_balance: balance::zero(),
             participants: vec_map::empty(),
+            suilend_obligations: vec_map::empty(),
+            total_deposited: 0,
+            total_yield_earned: 0,
             total_tickets: 0,
             admin,
         };
@@ -73,26 +97,20 @@ module lottery_pool::lottery_pool {
         transfer::transfer(admin_cap, admin);
     }
     
-    /// Deposit SUI and get a ticket
+    /// User deposits USDC to pool
+    /// Frontend will then deposit to Suilend and call record_suilend_deposit
     public fun deposit(
         pool: &mut LotteryPool,
-        payment: Coin<SUI>,
+        usdc_payment: Coin<USDC>,
         ctx: &mut TxContext
     ) {
-        let amount = coin::value(&payment);
-        
-        // Check minimum deposit
+        let amount = coin::value(&usdc_payment);
         assert!(amount >= MIN_DEPOSIT, EMinimumDeposit);
         
-        let payment_balance = coin::into_balance(payment);
         let sender = tx_context::sender(ctx);
         
-        // Add to pool with overflow check
-        let new_total = pool.total_deposits + amount;
-        assert!(new_total >= pool.total_deposits, 0); // Overflow check
-        
-        balance::join(&mut pool.balance, payment_balance);
-        pool.total_deposits = new_total;
+        // Store USDC temporarily
+        balance::join(&mut pool.usdc_deposits, coin::into_balance(usdc_payment));
         
         // Track participant
         if (vec_map::contains(&pool.participants, &sender)) {
@@ -103,119 +121,176 @@ module lottery_pool::lottery_pool {
             vec_map::insert(&mut pool.participants, sender, amount);
         };
         
-        // Calculate tickets (1 SUI = 1 ticket)
-        let tickets = amount / 1_000_000_000;
+        pool.total_deposited = pool.total_deposited + amount;
+        
+        // Calculate tickets (1 USDC = 1 ticket)
+        let tickets = amount / 1_000_000; // 6 decimals
         pool.total_tickets = pool.total_tickets + tickets;
         
-        // Give user a ticket
+        // Issue ticket (obligation_id will be added by frontend)
         let ticket = Ticket {
             id: object::new(ctx),
-            amount: amount,
+            amount_usdc: amount,
             pool_id: object::id_address(pool),
             owner: sender,
+            suilend_obligation_id: b"", // Filled by frontend
         };
         
-        // Emit event
+        // Emit event for frontend to catch
         event::emit(DepositEvent {
             depositor: sender,
-            amount: amount,
-            tickets: tickets,
+            amount_usdc: amount,
+            pool_id: object::id_address(pool),
+            timestamp: tx_context::epoch(ctx),
         });
         
         transfer::transfer(ticket, sender);
     }
     
-    /// Withdraw deposit
+    /// Frontend calls this after depositing to Suilend
+    /// Records the obligation ID for transparency
+    public fun record_suilend_deposit(
+        pool: &mut LotteryPool,
+        user: address,
+        obligation_id: vector<u8>,
+        ctx: &mut TxContext
+    ) {
+        // Only the user or admin can record
+        let sender = tx_context::sender(ctx);
+        assert!(sender == user || sender == pool.admin, ENotOwner);
+        
+        // Store obligation ID
+        if (vec_map::contains(&pool.suilend_obligations, &user)) {
+            vec_map::remove(&mut pool.suilend_obligations, &user);
+        };
+        vec_map::insert(&mut pool.suilend_obligations, user, obligation_id);
+        
+        event::emit(SuilendDepositEvent {
+            depositor: user,
+            amount_usdc: *vec_map::get(&pool.participants, &user),
+            obligation_id,
+        });
+    }
+    
+    /// Withdraw USDC
+    /// Frontend handles withdrawing from Suilend first
     public fun withdraw(
         pool: &mut LotteryPool,
         ticket: Ticket,
+        usdc_return: Coin<USDC>, // USDC returned from Suilend by frontend
         ctx: &mut TxContext
     ) {
-        let Ticket { id, amount, pool_id: _, owner } = ticket;
+        let Ticket { id, amount_usdc, pool_id: _, owner, suilend_obligation_id: _ } = ticket;
         object::delete(id);
         
         let sender = tx_context::sender(ctx);
         assert!(owner == sender, ENotOwner);
         
-        // Check pool has sufficient balance
-        assert!(balance::value(&pool.balance) >= amount, EInsufficientBalance);
+        // Verify correct amount returned from Suilend
+        assert!(coin::value(&usdc_return) >= amount_usdc, EInsufficientBalance);
         
         // Remove from participants
         if (vec_map::contains(&pool.participants, &sender)) {
             let current = *vec_map::get(&pool.participants, &sender);
             vec_map::remove(&mut pool.participants, &sender);
-            if (current > amount) {
-                vec_map::insert(&mut pool.participants, sender, current - amount);
+            if (current > amount_usdc) {
+                vec_map::insert(&mut pool.participants, sender, current - amount_usdc);
             };
         };
         
-        // Calculate tickets to remove
-        let tickets = amount / 1_000_000_000;
+        // Remove obligation tracking
+        if (vec_map::contains(&pool.suilend_obligations, &sender)) {
+            vec_map::remove(&mut pool.suilend_obligations, &sender);
+        };
+        
+        // Update totals
+        pool.total_deposited = pool.total_deposited - amount_usdc;
+        let tickets = amount_usdc / 1_000_000;
         pool.total_tickets = pool.total_tickets - tickets;
         
-        // Return the SUI
-        let withdraw_balance = balance::split(&mut pool.balance, amount);
-        let withdraw_coin = coin::from_balance(withdraw_balance, ctx);
+        event::emit(WithdrawEvent {
+            withdrawer: sender,
+            amount_usdc,
+        });
         
-        pool.total_deposits = pool.total_deposits - amount;
-        
-        transfer::public_transfer(withdraw_coin, sender);
+        // Transfer USDC to user
+        transfer::public_transfer(usdc_return, sender);
     }
     
-    /// Draw a winner - REQUIRES ADMIN CAP
-    public fun draw_winner(
-        _admin_cap: &AdminCap, // Proves caller is admin
+    /// Admin adds yield collected from Suilend
+    entry fun add_yield(
+        _admin_cap: &AdminCap,
+        pool: &mut LotteryPool,
+        yield_payment: Coin<USDC>,
+    ) {
+        let yield_amount = coin::value(&yield_payment);
+        balance::join(&mut pool.yield_balance, coin::into_balance(yield_payment));
+        pool.total_yield_earned = pool.total_yield_earned + yield_amount;
+        
+        event::emit(YieldAddedEvent {
+            amount: yield_amount,
+            total_yield: pool.total_yield_earned,
+        });
+    }
+    
+    /// Draw winner using VRF - prize from yield
+    entry fun draw_winner(
+        _admin_cap: &AdminCap,
         pool: &mut LotteryPool,
         prize_amount: u64,
+        r: &Random,
         ctx: &mut TxContext
     ) {
-        // Ensure pool has enough balance
-        assert!(balance::value(&pool.balance) >= prize_amount, EInsufficientBalance);
+        assert!(balance::value(&pool.yield_balance) >= prize_amount, EInsufficientYield);
         assert!(vec_map::length(&pool.participants) > 0, ENoParticipants);
         
-        // Simple random selection using epoch (still not perfect, but better than before)
-        // TODO: Integrate Sui VRF for production
-        let epoch = tx_context::epoch(ctx);
+        // VRF randomness
+        let mut generator = random::new_generator(r, ctx);
         let num_participants = vec_map::length(&pool.participants);
-        let winner_index = (epoch % (num_participants as u64));
+        let winner_index = random::generate_u64_in_range(&mut generator, 0, num_participants - 1);
         
         // Get winner
         let (winner_addr, _) = vec_map::get_entry_by_idx(&pool.participants, winner_index);
         
-        // Send prize
-        let prize_balance = balance::split(&mut pool.balance, prize_amount);
+        // Send prize from yield
+        let prize_balance = balance::split(&mut pool.yield_balance, prize_amount);
         let prize_coin = coin::from_balance(prize_balance, ctx);
         
-        // Emit event
         event::emit(WinnerEvent {
             winner: *winner_addr,
-            prize: prize_amount,
+            prize_usdc: prize_amount,
             draw_time: tx_context::epoch(ctx),
         });
         
         transfer::public_transfer(prize_coin, *winner_addr);
     }
     
-    /// Emergency pause - admin can prevent deposits
-    /// (For production, implement full pause mechanism)
-    
-    /// Get total deposits
-    public fun get_total_deposits(pool: &LotteryPool): u64 {
-        pool.total_deposits
+    /// View functions
+    public fun get_total_deposited(pool: &LotteryPool): u64 {
+        pool.total_deposited
     }
     
-    /// Get total tickets
+    public fun get_yield_balance(pool: &LotteryPool): u64 {
+        balance::value(&pool.yield_balance)
+    }
+    
+    public fun get_total_yield(pool: &LotteryPool): u64 {
+        pool.total_yield_earned
+    }
+    
     public fun get_total_tickets(pool: &LotteryPool): u64 {
         pool.total_tickets
     }
     
-    /// Get participant count
     public fun get_participant_count(pool: &LotteryPool): u64 {
         vec_map::length(&pool.participants)
     }
     
-    /// Check if address is admin
-    public fun is_admin(pool: &LotteryPool, addr: address): bool {
-        pool.admin == addr
+    public fun get_user_deposit(pool: &LotteryPool, user: address): u64 {
+        if (vec_map::contains(&pool.participants, &user)) {
+            *vec_map::get(&pool.participants, &user)
+        } else {
+            0
+        }
     }
 }
