@@ -3,6 +3,7 @@ import { Transaction } from '@mysten/sui/transactions'
 import { useState, useEffect } from 'react'
 import { LuckMeter } from './components/LuckMeter'
 import { SuilendClient, LENDING_MARKET_ID, LENDING_MARKET_TYPE } from '@suilend/sdk'
+import { DrawCountdowns } from './components/DrawCountdowns';
 
 function App() {
   const client = useSuiClient()
@@ -768,9 +769,12 @@ useEffect(() => {
 
             {/* Two Column Layout */}
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '30px', marginBottom: '30px' }}>
+{/* Draw Countdowns */}
+<DrawCountdowns />
               
               {/* Left Column - Your Dashboard */}
               <div>
+
                 {/* Deposit Section */}
                 <div style={{
                   background: 'rgba(26, 31, 58, 0.5)',
