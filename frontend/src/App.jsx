@@ -1,4 +1,5 @@
 import { VERSION } from './version';
+import { VERSION } from './version';
 import { ConnectButton, useCurrentAccount, useSignAndExecuteTransaction, useSuiClient } from '@mysten/dapp-kit'
 import { Transaction } from '@mysten/sui/transactions'
 import { useState, useEffect } from 'react'
