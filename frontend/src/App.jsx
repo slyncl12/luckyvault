@@ -124,12 +124,14 @@ function App() {
         },
         options: { showContent: true }
       })
-
       const tickets = objects.data
         .filter(obj => obj.data?.content?.dataType === 'moveObject')
+        .filter(obj => obj.data?.content?.fields?.pool_id === POOL_ID)
         .map(obj => ({
           objectId: obj.data.objectId,
           ...obj.data.content.fields
+        }))
+        }))
         }))
       
       setUserTickets(tickets)
