@@ -39,3 +39,10 @@ yarn-debug.log*
 # Backups
 backups/
 *.tar.gz
+
+# All .env file variations
+*.env
+*.env.local
+*.env.*
+.env*
+!.env.example
