@@ -1,184 +1,215 @@
-import { useState, useEffect } from 'react'
-import { useSuiClient } from '@mysten/dapp-kit'
+import { useEffect, useState } from 'react'
+import { SuiClient } from '@mysten/sui/client'
 
-const PACKAGE_ID = '0x92cb53d6272d4887b44cc2355bb4be78a08bad84a5ff7e2c9fe0f53afb52c521'
+const client = new SuiClient({ url: import.meta.env.VITE_SUI_RPC_URL })
 
 export function LuckMeter({ userAddress, onLuckLoaded }) {
-  const client = useSuiClient()
-  const [luckData, setLuckData] = useState(null)
+  const [luck, setLuck] = useState(null)
   const [loading, setLoading] = useState(true)
 
   useEffect(() => {
-    if (!userAddress) {
-      setLoading(false)
-      return
-    }
-
-    fetchLuckObject()
-    const interval = setInterval(fetchLuckObject, 30000)
-    return () => clearInterval(interval)
-  }, [userAddress])
-
-  const fetchLuckObject = async () => {
-    if (!userAddress) return
-
-    try {
-      const objects = await client.getOwnedObjects({
-        owner: userAddress,
-        filter: {
-          StructType: `${PACKAGE_ID}::lottery_personal::PlayerLuck`
-        },
-        options: { showContent: true }
-      })
-
-      if (objects.data && objects.data.length > 0 && objects.data[0].data) {
-        const fields = objects.data[0].data.content.fields
-
-        const luck = {
-          objectId: objects.data[0].data.objectId,
-          level: Math.min(10, Math.floor(parseInt(fields.regular_luck_bps || '10000') / 10000)),
-          lastUpdate: fields.last_regular_draw || '0'
-        }
-        setLuckData(luck)
-        if (onLuckLoaded) onLuckLoaded(luck)
-      } else {
-        setLuckData(null)
-        if (onLuckLoaded) onLuckLoaded(null)
+    async function fetchLuck() {
+      // If no wallet connected, show demo luck value
+      if (!userAddress) {
+        const demoLuck = 42 // Demo value for marketing
+        setLuck(demoLuck)
+        setLoading(false)
+        if (onLuckLoaded) onLuckLoaded(demoLuck)
+        return
       }
-    } catch (error) {
-      console.error('Error fetching luck object:', error)
-      setLuckData(null)
-    } finally {
-      setLoading(false)
+
+      try {
+        const poolData = await client.getObject({
+          id: import.meta.env.VITE_POOL_OBJECT_ID,
+          options: { showContent: true }
+        })
+
+        if (poolData.data?.content?.fields) {
+          const userLuck = poolData.data.content.fields.user_luck?.[userAddress] || 0
+          setLuck(userLuck)
+          if (onLuckLoaded) onLuckLoaded(userLuck)
+        }
+      } catch (error) {
+        console.error('Error fetching luck:', error)
+        setLuck(0)
+      } finally {
+        setLoading(false)
+      }
     }
-  }
+
+    fetchLuck()
+  }, [userAddress, onLuckLoaded])
 
   if (loading) {
     return (
       <div style={{
-        background: 'rgba(26, 31, 58, 0.5)',
-        border: '1px solid rgba(76, 209, 55, 0.2)',
+        background: 'linear-gradient(135deg, rgba(76, 209, 55, 0.1) 0%, rgba(45, 52, 54, 0.3) 100%)',
         borderRadius: '24px',
-        padding: '30px',
-        backdropFilter: 'blur(10px)',
-        textAlign: 'center'
+        padding: '32px',
+        border: '1px solid rgba(76, 209, 55, 0.2)',
+        backdropFilter: 'blur(10px)'
       }}>
-        <div style={{ fontSize: '18px', color: '#7f8fa6' }}>Loading luck data...</div>
+        <div style={{ textAlign: 'center', color: '#7f8fa6' }}>Loading...</div>
       </div>
     )
   }
 
-  if (!luckData) {
-    return null
-  }
-
-  const multiplier = luckData.level
-  const percentage = (luckData.level / 10) * 100
-
-  const getLuckColor = (level) => {
-    if (level <= 3) return { from: '#4cd137', to: '#44bd32', glow: 'rgba(76, 209, 55, 0.3)' }
-    if (level <= 6) return { from: '#00d2ff', to: '#3a7bd5', glow: 'rgba(0, 210, 255, 0.3)' }
-    if (level <= 8) return { from: '#667eea', to: '#764ba2', glow: 'rgba(102, 126, 234, 0.3)' }
-    return { from: '#f093fb', to: '#f5576c', glow: 'rgba(240, 147, 251, 0.3)' }
-  }
-
-  const colors = getLuckColor(luckData.level)
+  const luckPercentage = Math.min((luck / 100) * 100, 100)
+  const isDemo = !userAddress
 
   return (
     <div style={{
-      background: 'rgba(26, 31, 58, 0.5)',
-      border: '1px solid rgba(76, 209, 55, 0.2)',
+      background: 'linear-gradient(135deg, rgba(76, 209, 55, 0.1) 0%, rgba(45, 52, 54, 0.3) 100%)',
       borderRadius: '24px',
-      padding: '30px',
-      marginBottom: '20px',
-      backdropFilter: 'blur(10px)'
+      padding: '32px',
+      border: '1px solid rgba(76, 209, 55, 0.2)',
+      backdropFilter: 'blur(10px)',
+      position: 'relative',
+      overflow: 'hidden'
     }}>
+      {/* Animated background shimmer */}
+      <div style={{
+        position: 'absolute',
+        top: 0,
+        left: '-100%',
+        width: '200%',
+        height: '100%',
+        background: 'linear-gradient(90deg, transparent, rgba(76, 209, 55, 0.1), transparent)',
+        animation: 'shimmer 3s infinite',
+        pointerEvents: 'none'
+      }} />
+
+      <style>
+        {`
+          @keyframes shimmer {
+            0% { transform: translateX(0); }
+            100% { transform: translateX(50%); }
+          }
+        `}
+      </style>
+
       <h3 style={{
-        marginTop: 0,
-        color: '#fff',
-        fontSize: '18px',
-        marginBottom: '20px',
+        fontSize: '24px',
+        fontWeight: 'bold',
+        marginBottom: '24px',
+        background: 'linear-gradient(135deg, #4cd137 0%, #44bd32 100%)',
+        WebkitBackgroundClip: 'text',
+        WebkitTextFillColor: 'transparent',
         display: 'flex',
         alignItems: 'center',
-        gap: '10px'
+        gap: '12px'
       }}>
         🍀 Your Luck Meter
+        {isDemo && (
+          <span style={{
+            fontSize: '12px',
+            background: 'rgba(255, 193, 7, 0.2)',
+            color: '#ffc107',
+            padding: '4px 12px',
+            borderRadius: '12px',
+            fontWeight: 'normal'
+          }}>
+            Demo
+          </span>
+        )}
       </h3>
 
+      {/* Luck Bar */}
       <div style={{
-        background: `linear-gradient(135deg, ${colors.from} 0%, ${colors.to} 100%)`,
+        background: 'rgba(0, 0, 0, 0.3)',
         borderRadius: '16px',
-        padding: '25px',
-        marginBottom: '15px',
-        boxShadow: `0 8px 24px ${colors.glow}`
+        height: '48px',
+        position: 'relative',
+        overflow: 'hidden',
+        marginBottom: '16px',
+        border: '1px solid rgba(76, 209, 55, 0.1)'
       }}>
         <div style={{
+          position: 'absolute',
+          left: 0,
+          top: 0,
+          height: '100%',
+          width: `${luckPercentage}%`,
+          background: 'linear-gradient(90deg, #4cd137 0%, #44bd32 50%, #4cd137 100%)',
+          transition: 'width 1s ease-out',
+          borderRadius: '16px',
+          boxShadow: '0 0 20px rgba(76, 209, 55, 0.5)'
+        }} />
+        <div style={{
+          position: 'relative',
+          height: '100%',
           display: 'flex',
-          justifyContent: 'space-between',
           alignItems: 'center',
-          marginBottom: '15px'
+          justifyContent: 'center',
+          color: '#fff',
+          fontWeight: 'bold',
+          fontSize: '20px',
+          zIndex: 1,
+          textShadow: '0 2px 4px rgba(0,0,0,0.5)'
         }}>
-          <div>
-            <div style={{ fontSize: '14px', color: 'rgba(255,255,255,0.8)', marginBottom: '5px' }}>
-              Luck Level
-            </div>
-            <div style={{ fontSize: '36px', fontWeight: 'bold', color: '#fff' }}>
-              {luckData.level}
-            </div>
-          </div>
-          <div style={{ textAlign: 'right' }}>
-            <div style={{ fontSize: '14px', color: 'rgba(255,255,255,0.8)', marginBottom: '5px' }}>
-              Multiplier
-            </div>
-            <div style={{ fontSize: '36px', fontWeight: 'bold', color: '#fff' }}>
-              {multiplier}x
-            </div>
+          {luck} Luck Points
+        </div>
+      </div>
+
+      {/* Luck Info */}
+      <div style={{
+        display: 'grid',
+        gridTemplateColumns: '1fr 1fr',
+        gap: '16px',
+        fontSize: '14px'
+      }}>
+        <div style={{
+          background: 'rgba(0, 0, 0, 0.2)',
+          padding: '12px',
+          borderRadius: '12px',
+          border: '1px solid rgba(76, 209, 55, 0.1)'
+        }}>
+          <div style={{ color: '#7f8fa6', marginBottom: '4px' }}>Luck Level</div>
+          <div style={{ color: '#4cd137', fontWeight: 'bold', fontSize: '16px' }}>
+            {luck < 25 ? '🌱 Sprouting' :
+             luck < 50 ? '🍀 Lucky' :
+             luck < 75 ? '⭐ Very Lucky' :
+             '🌟 Legendary'}
           </div>
         </div>
-
         <div style={{
-          background: 'rgba(255,255,255,0.2)',
+          background: 'rgba(0, 0, 0, 0.2)',
+          padding: '12px',
           borderRadius: '12px',
-          height: '20px',
-          overflow: 'hidden',
-          position: 'relative'
+          border: '1px solid rgba(76, 209, 55, 0.1)'
         }}>
-          <div style={{
-            background: 'rgba(255,255,255,0.9)',
-            height: '100%',
-            width: `${percentage}%`,
-            borderRadius: '12px',
-            transition: 'width 0.5s ease',
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            fontSize: '11px',
-            fontWeight: 'bold',
-            color: colors.from
-          }}>
-            {percentage > 15 && `${percentage}%`}
+          <div style={{ color: '#7f8fa6', marginBottom: '4px' }}>Win Boost</div>
+          <div style={{ color: '#4cd137', fontWeight: 'bold', fontSize: '16px' }}>
+            +{luck}%
           </div>
         </div>
       </div>
 
+      {isDemo && (
+        <div style={{
+          marginTop: '16px',
+          padding: '12px',
+          background: 'rgba(255, 193, 7, 0.1)',
+          border: '1px solid rgba(255, 193, 7, 0.3)',
+          borderRadius: '12px',
+          fontSize: '13px',
+          color: '#ffc107',
+          textAlign: 'center'
+        }}>
+          💡 Connect your wallet to see your real luck!
+        </div>
+      )}
+
       <div style={{
-        background: 'rgba(15, 23, 42, 0.8)',
-        border: '1px solid rgba(76, 209, 55, 0.2)',
+        marginTop: '16px',
+        padding: '12px',
+        background: 'rgba(76, 209, 55, 0.05)',
         borderRadius: '12px',
-        padding: '15px',
         fontSize: '13px',
         color: '#7f8fa6',
-        lineHeight: '1.6'
+        lineHeight: '1.5'
       }}>
-        <div style={{ fontWeight: 'bold', color: '#4cd137', marginBottom: '8px' }}>
-          📈 How Luck Works:
-        </div>
-        <ul style={{ margin: '0', paddingLeft: '20px', color: '#e0e6ed' }}>
-          <li>Each ticket gets <strong style={{ color: '#4cd137' }}>{multiplier}x entries</strong> in the lottery</li>
-          <li>Luck increases by 1 per week (max 10)</li>
-          <li>Withdrawing a ticket resets luck to 1</li>
-          <li>Higher luck = Better odds of winning!</li>
-        </ul>
+        💎 Earn luck by depositing and holding USDC. Higher luck = better chances to win!
       </div>
     </div>
   )

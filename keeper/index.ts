@@ -1,103 +1,64 @@
 import { SuiClient } from '@mysten/sui/client';
 import { createPoolRebalancer } from './PoolRebalancer';
 import { Ed25519Keypair } from '@mysten/sui/keypairs/ed25519';
+import { decodeSuiPrivateKey } from '@mysten/sui/cryptography';
 import dotenv from 'dotenv';
+import { createDrawScheduler } from './DrawScheduler';
+import { WithdrawalFulfiller } from './WithdrawalFulfiller';
+import { NaviService } from './NaviService';
 
-// Load environment variables
 console.log('Loading .env file...');
-const result = dotenv.config({ path: '../frontend/.env' });
-if (result.error) {
-  console.error('❌ Error loading .env file:', result.error);
-  process.exit(1);
-}
+dotenv.config({ path: '.env' });
 console.log('✅ .env loaded');
-console.log('Environment variables:');
-console.log('- VITE_ADMIN_SECRET_KEY:', process.env.VITE_ADMIN_SECRET_KEY ? 'SET (hidden)' : 'NOT SET');
-console.log('- VITE_POOL_OBJECT_ID:', process.env.VITE_POOL_OBJECT_ID);
-console.log('- VITE_SUI_RPC_URL:', process.env.VITE_SUI_RPC_URL);
 
 async function main() {
-  console.log('\n🚀 Starting LuckyVault Pool Keeper...\n');
+  console.log('Environment variables:');
+  console.log('- VITE_ADMIN_SECRET_KEY:', process.env.VITE_ADMIN_SECRET_KEY ? 'SET (hidden)' : 'NOT SET');
+  console.log('- VITE_POOL_OBJECT_ID:', process.env.VITE_POOL_OBJECT_ID);
+  console.log();
 
-  // Validate environment variables
-  if (!process.env.VITE_ADMIN_SECRET_KEY) {
-    throw new Error('VITE_ADMIN_SECRET_KEY not found in environment');
-  }
-  if (!process.env.VITE_POOL_OBJECT_ID) {
-    throw new Error('VITE_POOL_OBJECT_ID not found in environment');
-  }
-  if (!process.env.VITE_SUI_RPC_URL) {
-    throw new Error('VITE_SUI_RPC_URL not found in environment');
-  }
+  console.log('🚀 Starting LuckyVault Pool Keeper...');
+  console.log();
 
-// Create keypair from secret key
-  console.log('Creating keypair from secret...');
-  const secretKeyArray = Array.from(Buffer.from(process.env.VITE_ADMIN_SECRET_KEY, 'base64'));
-  
-  // The stored key format is [32-byte secret | 16-byte public key prefix]
-  // We need just the 32-byte secret key
-  let secretKeyBytes: number[];
-  
-  if (secretKeyArray.length === 48) {
-    // Try first 32 bytes
-    secretKeyBytes = secretKeyArray.slice(0, 32);
-  } else if (secretKeyArray.length === 32) {
-    secretKeyBytes = secretKeyArray;
-  } else {
-    throw new Error(`Unexpected secret key length: ${secretKeyArray.length}`);
-  }
-  
-  const adminKeypair = Ed25519Keypair.fromSecretKey(Uint8Array.from(secretKeyBytes));
+  const rpcUrl = process.env.VITE_SUI_RPC_URL || 'https://sui-mainnet.nodeinfra.com';
+  const suiClient = new SuiClient({ url: rpcUrl });
+
+  console.log('Creating keypair from suiprivkey...');
+  const { schema, secretKey } = decodeSuiPrivateKey(process.env.VITE_ADMIN_SECRET_KEY!);
+  const adminKeypair = Ed25519Keypair.fromSecretKey(secretKey);
   const adminAddress = adminKeypair.toSuiAddress();
-  
-  // Verify this is the correct address
-  const expectedAddress = '0x01efafa2098e9cf9f89dfd16c11e07a05f89d4d745a466369aee195ae7d9acb4';
-  if (adminAddress !== expectedAddress) {
-    console.error(`❌ Address mismatch!`);
-    console.error(`   Expected: ${expectedAddress}`);
-    console.error(`   Got:      ${adminAddress}`);
-    throw new Error('Admin address does not match expected address. Check secret key format.');
-  }
-  
+  const naviService = new NaviService(suiClient, adminKeypair);
+
   console.log('👤 Admin Address:', adminAddress);
+
+  const expectedAddress = '0x9d1d93f595fbfc241d1a25c864d195bd401ba814368178e7fa5a21e552014382';
+  if (adminAddress !== expectedAddress) {
+    console.error('❌ Address mismatch!');
+    process.exit(1);
+  }
+
   console.log('✅ Address verified');
   console.log();
 
+  await naviService.initialize();
 
-  // Create SUI client
-  const suiClient = new SuiClient({ url: process.env.VITE_SUI_RPC_URL });
-
-  // Create and start pool rebalancer
-  const rebalancer = createPoolRebalancer(
-    suiClient,
-    adminKeypair,
-    process.env.VITE_POOL_OBJECT_ID,
-    {
-      minBalanceUsdc: 0.01,    // $0.01 minimum
-      targetBalanceUsdc: 0.01, // $0.01 target
-      maxBalanceUsdc: 0.02,    // $0.02 maximum - trigger deposit
-      checkIntervalMs: 30000,  // Check every 30 seconds
-    }
-  );
-
+  const rebalancer = createPoolRebalancer(suiClient, adminKeypair, naviService);
   await rebalancer.start();
 
-  // Handle shutdown gracefully
-  process.on('SIGINT', () => {
-    console.log('\n🛑 Shutting down gracefully...');
-    rebalancer.stop();
-    process.exit(0);
-  });
+  const withdrawalFulfiller = new WithdrawalFulfiller(suiClient, adminKeypair, naviService);
+  await withdrawalFulfiller.start();
 
-  process.on('SIGTERM', () => {
-    console.log('\n🛑 Shutting down gracefully...');
-    rebalancer.stop();
-    process.exit(0);
-  });
+  const scheduler = createDrawScheduler(
+    suiClient,
+    adminKeypair,
+    process.env.VITE_POOL_OBJECT_ID!
+  );
+  await scheduler.start();
+
+  console.log('✅ All services started!');
 }
 
-main().catch((error) => {
+main().catch(error => {
   console.error('❌ Fatal error:', error);
-  console.error('Stack trace:', error.stack);
   process.exit(1);
 });

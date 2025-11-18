@@ -1,19 +1,28 @@
 {
   "name": "luckyvault-keeper",
   "version": "1.0.0",
-  "description": "LuckyVault pool rebalancing keeper",
-  "type": "module",
+  "description": "LuckyVault Pool Keeper",
   "main": "index.ts",
   "scripts": {
     "start": "tsx index.ts",
-    "dev": "tsx watch index.ts"
+    "pm2:start": "npx pm2 start ecosystem.config.js",
+    "pm2:stop": "npx pm2 stop luckyvault-keeper",
+    "pm2:restart": "npx pm2 restart luckyvault-keeper",
+    "pm2:logs": "npx pm2 logs luckyvault-keeper",
+    "pm2:status": "npx pm2 status"
   },
   "dependencies": {
-    "@mysten/sui": "^1.42.0",
+    "@mysten/sui": "^1.14.0",
+    "@naviprotocol/lending": "^1.2.2-dev.1",
     "@suilend/sdk": "^1.1.91",
-    "dotenv": "^17.2.3"
+    "axios": "^1.7.7",
+    "cheerio": "^1.0.0",
+    "dotenv": "^16.4.7"
   },
   "devDependencies": {
-    "tsx": "^4.20.6"
+    "@types/node": "^22.10.1",
+    "pm2": "^5.4.2",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
   }
 }

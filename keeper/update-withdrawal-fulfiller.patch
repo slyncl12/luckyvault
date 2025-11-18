@@ -1,0 +1,25 @@
+--- a/WithdrawalFulfiller.ts
++++ b/WithdrawalFulfiller.ts
+@@ -15,6 +15,9 @@
+   private suiClient: SuiClient;
+   private packageId: string;
+   private poolObjectId: string;
++  
++  // Only process withdrawals after this timestamp (filter old pool requests)
++  private minTimestamp: number = 1731888000000; // Will be updated
+ 
+   constructor(keypair: Ed25519Keypair, poolObjectId: string) {
+     this.keypair = keypair;
+@@ -84,6 +87,13 @@
+         timestamp: parseInt(event.parsedJson.timestamp)
+       }));
+       
++      // Filter out old withdrawal requests from previous pools
++      const recentRequests = withdrawalRequests.filter(req => 
++        req.timestamp >= this.minTimestamp
++      );
++      
++      console.log(`📋 Found ${withdrawalRequests.length} total requests, ${recentRequests.length} recent`);
++      
+-      for (const request of withdrawalRequests) {
++      for (const request of recentRequests) {

@@ -1,0 +1,417 @@
+import { Ed25519Keypair } from '@mysten/sui/keypairs/ed25519';
+import { SuiClient } from '@mysten/sui/client';
+import { Transaction } from '@mysten/sui/transactions';
+import { suilendService } from './SuilendService';
+
+interface RebalancerConfig {
+  minBalanceUsdc: number;
+  targetBalanceUsdc: number;
+  maxBalanceUsdc: number;
+  checkIntervalMs: number;
+}
+
+export class PoolRebalancer {
+  private suiClient: SuiClient;
+  private keypair: Ed25519Keypair;
+  private poolObjectId: string;
+  private config: RebalancerConfig;
+  private intervalId?: NodeJS.Timeout;
+  private isRunning = false;
+
+  constructor(
+    suiClient: SuiClient,
+    keypair: Ed25519Keypair,
+    poolObjectId: string,
+    config: RebalancerConfig
+  ) {
+    this.suiClient = suiClient;
+    this.keypair = keypair;
+    this.poolObjectId = poolObjectId;
+    this.config = config;
+  }
+
+  async start(): Promise<void> {
+    if (this.isRunning) {
+      console.log('⚠️  Rebalancer is already running');
+      return;
+    }
+
+    console.log('🚀 Starting Pool Rebalancer...');
+    console.log(`   Min Balance: $${this.config.minBalanceUsdc.toFixed(2)}`);
+    console.log(`   Target Balance: $${this.config.targetBalanceUsdc.toFixed(2)}`);
+    console.log(`   Max Balance: $${this.config.maxBalanceUsdc.toFixed(2)}`);
+    console.log(`   Check Interval: ${this.config.checkIntervalMs / 1000}s`);
+
+    // Initialize Suilend
+    await suilendService.initialize();
+
+    this.isRunning = true;
+
+    // Run initial check
+    await this.checkAndRebalance();
+
+    // Set up interval
+    this.intervalId = setInterval(async () => {
+      await this.checkAndRebalance();
+    }, this.config.checkIntervalMs);
+
+    console.log('✅ Pool Rebalancer started\n');
+  }
+
+  stop(): void {
+    if (!this.isRunning) {
+      return;
+    }
+
+    if (this.intervalId) {
+      clearInterval(this.intervalId);
+      this.intervalId = undefined;
+    }
+
+    this.isRunning = false;
+    console.log('🛑 Pool Rebalancer stopped');
+  }
+
+  private async checkAndRebalance(): Promise<void> {
+    try {
+      console.log('⏰ Running rebalance check...');
+
+      // Get pool status
+      const poolBalance = await this.getPoolBalance();
+      const suilendBalance = await this.getSuilendBalance();
+      const totalBalance = poolBalance + suilendBalance;
+      const yieldEarned = 0; // TODO: Calculate yield
+
+      console.log('📊 Pool Status:');
+      console.log(`   Total Balance: $${totalBalance.toFixed(2)}`);
+      console.log(`   In Pool: $${poolBalance.toFixed(2)}`);
+      console.log(`   In Suilend: $${suilendBalance.toFixed(2)}`);
+      console.log(`   Yield Earned: $${yieldEarned.toFixed(2)}`);
+
+      // Check if rebalancing is needed
+      if (poolBalance > this.config.maxBalanceUsdc) {
+        // Pool has too much - deposit to Suilend
+        const excessAmount = poolBalance - this.config.targetBalanceUsdc;
+        console.log('🔄 Rebalancing needed!');
+        console.log(`   Action: DEPOSIT`);
+        console.log(`   Amount: $${excessAmount.toFixed(2)}`);
+
+        await this.depositExcessToSuilend(excessAmount);
+      } else if (poolBalance < this.config.minBalanceUsdc && suilendBalance > 0) {
+        // Pool has too little - withdraw from Suilend
+        const neededAmount = this.config.targetBalanceUsdc - poolBalance;
+        const withdrawAmount = Math.min(neededAmount, suilendBalance);
+        console.log('🔄 Rebalancing needed!');
+        console.log(`   Action: WITHDRAW`);
+        console.log(`   Amount: $${withdrawAmount.toFixed(2)}`);
+
+        await this.withdrawFromSuilendToPool(withdrawAmount);
+      } else {
+        console.log('✅ Pool is balanced, no action needed');
+      }
+
+      console.log();
+    } catch (error) {
+      console.error('❌ Error during rebalance check:', error);
+    }
+  }
+
+  private async getPoolBalance(): Promise<number> {
+    try {
+      const poolObject = await this.suiClient.getObject({
+        id: this.poolObjectId,
+        options: { showContent: true },
+      });
+
+      if (!poolObject.data?.content || poolObject.data.content.dataType !== 'moveObject') {
+        throw new Error('Invalid pool object');
+      }
+
+      const fields = poolObject.data.content.fields as any;
+      const balance = Number(fields.balance || 0);
+      return balance / 1_000_000; // Convert from base units to USDC
+    } catch (error) {
+      console.error('Error getting pool balance:', error);
+      return 0;
+    }
+  }
+
+  private async getSuilendBalance(): Promise<number> {
+    // TODO: Track cToken balance and calculate USDC value
+    return 0;
+  }
+
+  private async depositExcessToSuilend(amount: number): Promise<void> {
+    try {
+      console.log(`💰 Depositing $${amount.toFixed(2)} to Suilend...`);
+
+      // Step 1: Withdraw from pool using admin function
+      const withdrawResult = await this.withdrawFromPool(amount);
+      
+      if (!withdrawResult.success || !withdrawResult.coinId) {
+        throw new Error('Failed to withdraw from pool');
+      }
+
+
+console.log('✅ Withdrew $' + amount.toFixed(2) + ' from pool');
+      console.log('   Transaction:', withdrawResult.digest);
+      console.log('📍 USDC Coin ID:', withdrawResult.coinId);
+
+      // Wait for transaction to finalize on-chain
+      console.log('⏳ Waiting 5 seconds for transaction to finalize...');
+      await new Promise(resolve => setTimeout(resolve, 5000));
+      
+      // Step 2: Deposit directly to Suilend
+      console.log('📤 Depositing to Suilend...');
+      
+      try {
+        await this.depositSpecificCoinToSuilend(
+          withdrawResult.coinId,
+          amount
+        );
+        
+        console.log('✅ Successfully deposited to Suilend!');
+        
+        // Get current APY
+        try {
+          const apy = await suilendService.getUSDCSupplyAPY();
+          console.log(`   💰 Now earning ${apy.toFixed(2)}% APY on Suilend!`);
+        } catch (e) {
+          console.log('   💰 Now earning yield on Suilend!');
+        }
+        
+      } catch (error) {
+        console.error('❌ Suilend deposit failed:', error);
+        console.log('💰 Attempting to return funds to pool...');
+        
+        // Return the coin to the pool
+        try {
+          const returnTx = new Transaction();
+          returnTx.moveCall({
+            target: `${process.env.VITE_POOL_PACKAGE_ID}::lottery_personal::admin_deposit_from_suilend`,
+            typeArguments: [process.env.VITE_USDC_TYPE!],
+            arguments: [
+              returnTx.object(process.env.VITE_ADMIN_CAP_ID!),
+              returnTx.object(this.poolObjectId),
+              returnTx.object(withdrawResult.coinId),
+              returnTx.object(process.env.VITE_CLOCK_ID!),
+            ],
+          });
+          
+          await this.suiClient.signAndExecuteTransaction({
+            transaction: returnTx,
+            signer: this.keypair,
+            options: { showEffects: true },
+          });
+          
+          console.log('✅ Funds returned to pool');
+        } catch (returnError) {
+          console.error('❌ Failed to return funds to pool:', returnError);
+          console.error('⚠️  Manual intervention required - coin ID:', withdrawResult.coinId);
+        }
+        
+        throw error;
+      }
+
+      // Step 2: Deposit that specific coin to Suilend
+      // Step 2: Deposit ONLY this specific coin to Suilend
+      console.log(`📤 Depositing to Suilend...`);
+      await this.depositSpecificCoinToSuilend(withdrawResult.coinId, amount);
+
+console.log('✅ Successfully deposited to Suilend!');
+      console.log(`   Transaction: ${result.digest}`);
+      
+      // Get current APY from Suilend
+      try {
+        const apy = await suilendService.getUSDCSupplyAPY();
+        console.log(`   💰 Now earning ${apy.toFixed(2)}% APY on Suilend!`);
+      } catch (e) {
+        console.log('   💰 Now earning yield on Suilend!');
+      }   
+    } catch (error) {
+      console.error('❌ Error depositing to Suilend:', error);
+      throw error;
+    }
+  }
+
+  private async withdrawFromPool(amount: number): Promise<{
+    success: boolean;
+    digest?: string;
+    coinId?: string;
+  }> {
+    try {
+      const amountInBaseUnits = Math.floor(amount * 1_000_000);
+
+      const tx = new Transaction();
+      
+// Call admin_withdraw_for_suilend
+      tx.moveCall({
+        target: `${process.env.VITE_POOL_PACKAGE_ID}::lottery_personal::admin_withdraw_for_suilend`,
+        typeArguments: [process.env.VITE_USDC_TYPE!],
+        arguments: [
+          tx.object(process.env.VITE_ADMIN_CAP_ID!),
+          tx.object(this.poolObjectId),
+          tx.pure.u64(amountInBaseUnits),
+          tx.object(process.env.VITE_CLOCK_ID!),
+        ],
+      });
+      const result = await this.suiClient.signAndExecuteTransaction({
+        transaction: tx,
+        signer: this.keypair,
+        options: {
+          showEffects: true,
+          showObjectChanges: true,
+        },
+      });
+
+      // Extract the created USDC coin ID
+      const createdObjects = result.objectChanges?.filter(
+        (change: any) => change.type === 'created'
+      );
+
+      const usdcCoin = createdObjects?.find((obj: any) =>
+        obj.objectType?.includes('usdc::USDC') && !obj.objectType?.includes('CToken')
+      );
+
+      if (!usdcCoin) {
+        throw new Error('Could not find created USDC coin');
+      }
+
+      return {
+        success: true,
+        digest: result.digest,
+        coinId: usdcCoin.objectId,
+      };
+    } catch (error) {
+      console.error('Error withdrawing from pool:', error);
+      return { success: false };
+    }
+  }
+
+  private async depositSpecificCoinToSuilend(
+    usdcCoinId: string,
+    amount: number
+  ): Promise<void> {
+    try {
+      // CRITICAL SAFETY CHECK: Verify this coin came from our pool withdrawal
+      const coinInfo = await this.suiClient.getObject({
+        id: usdcCoinId,
+        options: { 
+          showContent: true,
+          showType: true,
+          showPreviousTransaction: true 
+        },
+      });
+
+      if (!coinInfo.data) {
+        throw new Error(`Coin ${usdcCoinId} not found`);
+      }
+
+      // Verify it's USDC
+      if (!coinInfo.data.type?.includes('usdc::USDC')) {
+        throw new Error(`Coin ${usdcCoinId} is not USDC`);
+      }
+
+      console.log(`   ✅ Verified coin ${usdcCoinId} is USDC from pool withdrawal`);
+
+      // Deposit to Suilend using our service
+await suilendService.depositToSuilend(
+  this.keypair,
+  usdcCoinId,
+  amount * 1_000_000  // <-- Convert to micro-USDC: 990000
+);    } catch (error) {
+      console.error('Error in depositSpecificCoinToSuilend:', error);
+      throw error;
+    }
+  }
+
+private async withdrawFromSuilendToPool(amount: number): Promise<void> {
+    console.log(`💸 Withdrawing $${amount.toFixed(2)} from Suilend to pool...`);
+    
+    try {
+      // Get current Suilend position
+      const position = await suilendService.getUserPosition(this.keypair.toSuiAddress());
+      
+      if (!position || parseFloat(position.currentValue) < amount * 1_000_000) {
+        throw new Error('Insufficient balance in Suilend');
+      }
+      
+      // Withdraw from Suilend
+      console.log('📤 Creating Suilend withdrawal transaction...');
+      const tx = await suilendService.withdrawUSDC(
+        this.keypair.toSuiAddress(),
+        amount,
+        position.obligationId
+      );
+      
+      // Execute transaction
+      const result = await this.suiClient.signAndExecuteTransaction({
+        transaction: tx,
+        signer: this.keypair,
+        options: {
+          showEffects: true,
+          showObjectChanges: true,
+        },
+      });
+      
+      console.log('✅ Withdrew from Suilend');
+      console.log('   Transaction:', result.digest);
+      
+      // The withdrawn USDC is now in admin wallet
+      // Wait for indexing
+      await new Promise(resolve => setTimeout(resolve, 5000));
+      
+      // Find the withdrawn USDC coin
+      const coins = await this.suiClient.getCoins({
+        owner: this.keypair.toSuiAddress(),
+        coinType: process.env.VITE_USDC_TYPE!
+      });
+      
+      // Find a coin with balance >= amount (recently created)
+      const withdrawnCoin = coins.data.find(c => parseInt(c.balance) >= amount * 1_000_000);
+      
+      if (!withdrawnCoin) {
+        throw new Error('Could not find withdrawn USDC coin');
+      }
+      
+      console.log('💰 Depositing back to pool...');
+      
+      // Deposit back to pool using admin_deposit_from_suilend
+      const depositTx = new Transaction();
+      depositTx.moveCall({
+        target: `${process.env.VITE_POOL_PACKAGE_ID}::lottery_personal::admin_deposit_from_suilend`,
+        typeArguments: [process.env.VITE_USDC_TYPE!],
+        arguments: [
+          depositTx.object(process.env.VITE_ADMIN_CAP_ID!),
+          depositTx.object(this.poolObjectId),
+          depositTx.object(withdrawnCoin.coinObjectId),
+          depositTx.object(process.env.VITE_CLOCK_ID!),
+        ],
+      });
+      
+      await this.suiClient.signAndExecuteTransaction({
+        transaction: depositTx,
+        signer: this.keypair,
+        options: { showEffects: true },
+      });
+      
+      console.log('✅ Deposited to pool from Suilend');
+      
+    } catch (error) {
+      console.error('Error withdrawing from Suilend:', error);
+      throw error;
+    }
+  }
+}
+// Export singleton rebalancer
+export let poolRebalancer: PoolRebalancer | null = null;
+
+export function createPoolRebalancer(
+  suiClient: SuiClient,
+  keypair: Ed25519Keypair,
+  poolObjectId: string,
+  config: RebalancerConfig
+): PoolRebalancer {
+  poolRebalancer = new PoolRebalancer(suiClient, keypair, poolObjectId, config);
+  return poolRebalancer;
+}

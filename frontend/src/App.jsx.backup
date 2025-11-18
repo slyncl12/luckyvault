@@ -1,101 +1,116 @@
+import React, { useState, useEffect } from 'react'
 import { ConnectButton, useCurrentAccount, useSignAndExecuteTransaction, useSuiClient } from '@mysten/dapp-kit'
 import { Transaction } from '@mysten/sui/transactions'
-import { useState, useEffect } from 'react'
-import { SuilendStats } from './components/SuilendStats'
-import { AdminPanel } from './components/AdminPanel'
 import { LuckMeter } from './components/LuckMeter'
-
-
-// ============ MAINNET ADDRESSES ============
-const PACKAGE_ID = '0x92cb53d6272d4887b44cc2355bb4be78a08bad84a5ff7e2c9fe0f53afb52c521'
-const POOL_ID = '0x5d39ad238075d12fa011c24a288dabf08b05c851b41cc9512a32a9979478fc6e'
-const DRAW_CONFIG_ID = '0x8dffbe35b65805537930a310d8ceec2353e89017f20b9352326919abf4ff1ba7'
-const JACKPOT_TIERS_ID = '0x81398807debd2fd2d3f5d9c122d72ce7590165c4f1102d35ea1ec699e719e061'
-const SUILEND_TRACKER_ID = '0x8d7e254e8a17480ba2c6e2613dcc018dfe2b24b8bfb67cae725a9185cfca85eb'
-const USDC_TYPE = '0xdba34672e30cb065b1f93e3ab55318768fd6fef66c15942c9f7cb846e2f900e7::usdc::USDC'
-const CLOCK_ID = '0x6'
-const RANDOM_ID = '0x8'
+import { getNaviAPY } from './lib/navi-api'
 
 function App() {
   const client = useSuiClient()
   const account = useCurrentAccount()
   const { mutate: signAndExecute } = useSignAndExecuteTransaction()
+
+  // ============ MAINNET ADDRESSES ============
+  const PACKAGE_ID = import.meta.env.VITE_PACKAGE_ID
+  const POOL_ID = import.meta.env.VITE_POOL_OBJECT_ID
+  const DRAW_CONFIG_ID = import.meta.env.VITE_DRAW_CONFIG_ID
+  const JACKPOT_TIERS_ID = import.meta.env.VITE_JACKPOT_TIERS_ID
+  const SUILEND_TRACKER_ID = import.meta.env.VITE_SUILEND_TRACKER_ID
+  const USDC_TYPE = '0xdba34672e30cb065b1f93e3ab55318768fd6fef66c15942c9f7cb846e2f900e7::usdc::USDC'
+  const CLOCK_ID = '0x6'
+  const RANDOM_ID = '0x8'
+
+  const [naviAPY, setNaviAPY] = useState(0)
+  const [apyLoading, setApyLoading] = useState(true)
+  const [status, setStatus] = useState('')
   const [selectedTicket, setSelectedTicket] = useState(null)
   const [poolData, setPoolData] = useState(null)
   const [userUSDC, setUserUSDC] = useState([])
-  const [userSUI, setUserSUI] = useState('0')
+  const [userSUI, setUserSUI] = useState([])
   const [userTickets, setUserTickets] = useState([])
   const [userLuck, setUserLuck] = useState(null)
   const [depositAmount, setDepositAmount] = useState('')
   const [loading, setLoading] = useState(false)
-  const [status, setStatus] = useState('')
-const [jackpotBalances, setJackpotBalances] = useState({
-  hourly: 0,
-  daily: 0,
-  weekly: 0,
-  monthly: 0
-})
-const [nextDrawTimes, setNextDrawTimes] = useState({
-  hourly: 0,
-  daily: 0,
-  weekly: 0,
-  monthly: 0
-})
-const [suilendStats, setSuilendStats] = useState({
-  deposited: 0,
-  yieldEarned: 0,
-  threshold: 10000
-})
 
-// Helper function to format time until next draw
-const getTimeUntil = (timestamp) => {
-  const now = Date.now()
-  const diff = timestamp - now
-  
-  if (diff <= 0) return 'Ready to draw!'
-  
-  const hours = Math.floor(diff / 3600000)
-  const minutes = Math.floor((diff % 3600000) / 60000)
-  
-  if (hours > 24) {
-    const days = Math.floor(hours / 24)
-    return `${days}d ${hours % 24}h`
+  useEffect(() => {
+    async function fetchNaviAPY() {
+      try {
+        setApyLoading(true)
+        const apy = await getNaviAPY()
+        setNaviAPY(apy)
+        console.log(`✅ NAVI APY loaded: ${apy.toFixed(2)}%`)
+      } catch (error) {
+        console.error('Failed to fetch NAVI APY:', error)
+        setNaviAPY(0)
+      } finally {
+        setApyLoading(false)
+      }
+    }
+    fetchNaviAPY()
+    const interval = setInterval(fetchNaviAPY, 5 * 60 * 1000)
+    return () => clearInterval(interval)
+  }, [])
+
+  const [jackpotBalances, setJackpotBalances] = useState({
+    hourly: 0,
+    daily: 0,
+    weekly: 0,
+    monthly: 0
+  })
+
+  const [nextDrawTimes, setNextDrawTimes] = useState({
+    hourly: 0,
+    daily: 0,
+    weekly: 0,
+    monthly: 0
+  })
+
+  const [suilendStats, setSuilendStats] = useState({
+    deposited: 0,
+    yieldEarned: 0,
+    threshold: 10000
+  })
+
+  const getTimeUntil = (timestamp) => {
+    const now = Date.now()
+    const diff = timestamp - now
+    if (diff <= 0) return 'Ready!'
+    const hours = Math.floor(diff / 3600000)
+    const minutes = Math.floor((diff % 3600000) / 60000)
+    if (hours > 24) {
+      const days = Math.floor(hours / 24)
+      return `${days}d ${hours % 24}h`
+    }
+    return `${hours}h ${minutes}m`
   }
-  
-  return `${hours}h ${minutes}m`
-}
 
-
-  // Fetch pool data
   const fetchPoolData = async () => {
     try {
       const poolObject = await client.getObject({
         id: POOL_ID,
         options: { showContent: true }
       })
-
       if (poolObject.data?.content?.dataType === 'moveObject') {
         const fields = poolObject.data.content.fields
         setPoolData({
-          balance: fields.balance || '0',
-          totalDeposited: fields.total_deposited || '0',
-          paused: fields.paused || false,
-          whitelistSize: fields.whitelist?.fields?.contents?.length || 0
+          balance: parseInt(fields.balance || '0'),
+          totalDeposited: parseInt(fields.total_deposited || '0'),
+          whitelistSize: fields.whitelist?.fields?.contents?.length || 0,
+          paused: fields.paused || false
         })
       }
     } catch (error) {
-      console.error('Error fetching pool:', error)
+      console.error('Error fetching pool data:', error)
     }
   }
 
   const fetchUserSUI = async () => {
     if (!account) return
     try {
-      const balance = await client.getBalance({
+      const coins = await client.getCoins({
         owner: account.address,
         coinType: '0x2::sui::SUI'
       })
-      setUserSUI(balance.totalBalance)
+      setUserSUI(coins.data)
     } catch (error) {
       console.error('Error fetching SUI:', error)
     }
@@ -114,13 +129,60 @@ const getTimeUntil = (timestamp) => {
     }
   }
 
- const fetchJackpotBalances = async () => {
+  const fetchUserTickets = async () => {
+    if (!account) return
+    try {
+      const objects = await client.getOwnedObjects({
+        owner: account.address,
+        filter: { StructType: `${PACKAGE_ID}::lottery_personal::Ticket` },
+        options: { showContent: true }
+      })
+      const tickets = objects.data
+        .filter(obj => obj.data?.content?.dataType === 'moveObject')
+        .map(obj => ({
+          objectId: obj.data.objectId,
+          ...obj.data.content.fields
+        }))
+      setUserTickets(tickets)
+    } catch (error) {
+      console.error('Error fetching tickets:', error)
+    }
+  }
+
+  const fetchUserLuck = async () => {
+    if (!account) return
+    try {
+      const objects = await client.getOwnedObjects({
+        owner: account.address,
+        filter: { StructType: `${PACKAGE_ID}::lottery_personal::PlayerLuck` },
+        options: { showContent: true }
+      })
+      if (objects.data.length > 0) {
+        const luckObj = objects.data[0]
+        if (luckObj.data?.content?.dataType === 'moveObject') {
+          setUserLuck({
+            objectId: luckObj.data.objectId,
+            ...luckObj.data.content.fields
+          })
+        }
+      } else {
+        setUserLuck(null)
+      }
+    } catch (error) {
+      console.error('Error fetching luck:', error)
+    }
+  }
+
+  const fetchJackpotBalances = async () => {
+    if (!JACKPOT_TIERS_ID) {
+      console.log('⚠️ JACKPOT_TIERS_ID not configured')
+      return
+    }
     try {
       const jackpotObject = await client.getObject({
         id: JACKPOT_TIERS_ID,
         options: { showContent: true }
       })
-
       if (jackpotObject.data?.content?.dataType === 'moveObject') {
         const fields = jackpotObject.data.content.fields
         setJackpotBalances({
@@ -129,7 +191,6 @@ const getTimeUntil = (timestamp) => {
           weekly: parseInt(fields.weekly_pool || '0'),
           monthly: parseInt(fields.monthly_pool || '0')
         })
-        
         setNextDrawTimes({
           hourly: parseInt(fields.last_hourly_draw || '0') + 3600000,
           daily: parseInt(fields.last_daily_draw || '0') + 86400000,
@@ -148,7 +209,6 @@ const getTimeUntil = (timestamp) => {
         id: SUILEND_TRACKER_ID,
         options: { showContent: true }
       })
-
       if (trackerObject.data?.content?.dataType === 'moveObject') {
         const fields = trackerObject.data.content.fields
         setSuilendStats({
@@ -158,839 +218,809 @@ const getTimeUntil = (timestamp) => {
         })
       }
     } catch (error) {
-      console.error('Error fetching Suilend stats:', error)
+      console.error('Error fetching NAVI stats:', error)
     }
   }
 
-const fetchUserTickets = async () => {
-  if (!account) return
-  try {
-    const objects = await client.getOwnedObjects({
-      owner: account.address,
-      filter: {
-        StructType: `${PACKAGE_ID}::lottery_personal::Ticket`
-      },
-      options: { showContent: true }
-    })
-
-
-    const tickets = objects.data
-      .filter(obj => obj.data?.content)
-      .map(obj => ({
-        objectId: obj.data.objectId,
-        amount: parseInt(obj.data.content.fields.amount || '0'),
-        owner: obj.data.content.fields.owner
-      }))
-    
-    setUserTickets(tickets)
-  } catch (error) {
-    console.error('Error fetching tickets:', error)
-  }
-}
-const fetchUserLuck = async () => {
-  if (!account) return
-  console.log('🔍 Fetching luck for:', account.address)  // ADD THIS
-  try {
-    const objects = await client.getOwnedObjects({
-      owner: account.address,
-      filter: {
-        StructType: `${PACKAGE_ID}::lottery_personal::PlayerLuck`
-      },
-      options: { showContent: true }
-    })
-    
-    console.log('📦 Luck objects found:', objects.data.length)  // ADD THIS
-    
-    if (objects.data && objects.data.length > 0 && objects.data[0].data) {
-      const fields = objects.data[0].data.content.fields
-      console.log('🍀 Luck fields:', fields)  // ADD THIS
-      const luck = {
-        objectId: objects.data[0].data.objectId,
-        level: Math.min(10, Math.floor(parseInt(fields.regular_luck_bps || '10000') / 10000)),
-        lastUpdate: fields.last_regular_draw || '0'
+  const handleDeposit = async () => {
+    if (!account || !depositAmount || parseFloat(depositAmount) <= 0) {
+      setStatus('❌ Please enter a valid amount')
+      return
+    }
+    setLoading(true)
+    try {
+      if (!userLuck) {
+        setStatus('Creating your luck profile...')
+        const luckTx = new Transaction()
+        luckTx.moveCall({
+          target: `${PACKAGE_ID}::lottery_personal::create_my_luck`,
+          arguments: [luckTx.object(CLOCK_ID)]
+        })
+        await new Promise((resolve, reject) => {
+          signAndExecute(
+            { transaction: luckTx },
+            {
+              onSuccess: () => {
+                setTimeout(() => {
+                  fetchUserLuck()
+                  resolve()
+                }, 2000)
+              },
+              onError: (error) => {
+                console.error('Luck creation failed:', error)
+                reject(error)
+              }
+            }
+          )
+        })
       }
-      console.log('✅ Setting userLuck:', luck)  // ADD THIS
-      setUserLuck(luck)
-    } else {
-      console.log('❌ No luck data found')  // ADD THIS
+      setStatus('Processing deposit...')
+      const amountInMicroUSDC = Math.floor(parseFloat(depositAmount) * 1_000_000)
+      const usdcCoin = userUSDC.find(coin => coin.balance >= amountInMicroUSDC)
+      if (!usdcCoin) {
+        setStatus('❌ Insufficient USDC balance')
+        setLoading(false)
+        return
+      }
+      const tx = new Transaction()
+      const [coin] = tx.splitCoins(tx.object(usdcCoin.coinObjectId), [amountInMicroUSDC])
+      tx.moveCall({
+        target: `${PACKAGE_ID}::lottery_personal::deposit_smart`,
+        typeArguments: [USDC_TYPE],
+        arguments: [
+          tx.object(POOL_ID),
+          tx.object(DRAW_CONFIG_ID),
+          coin,
+          tx.object(CLOCK_ID)
+        ],
+      })
+      signAndExecute(
+        { transaction: tx },
+        {
+          onSuccess: (result) => {
+            console.log('Deposit successful:', result)
+            setStatus('✅ Deposit successful! Ticket created.')
+            setDepositAmount('')
+            setTimeout(() => {
+              fetchUserUSDC()
+              fetchUserSUI()
+              fetchUserTickets()
+              fetchUserLuck()
+              fetchPoolData()
+              fetchJackpotBalances()
+              setLoading(false)
+            }, 2000)
+          },
+          onError: (error) => {
+            console.error('Deposit failed:', error)
+            setStatus('❌ Deposit failed: ' + error.message)
+            setLoading(false)
+          },
+        }
+      )
+    } catch (error) {
+      console.error('Error:', error)
+      setStatus('❌ Error: ' + error.message)
+      setLoading(false)
     }
-  } catch (error) {
-    console.error('Error fetching luck:', error)
-  }
-}
-  useEffect(() => {
-    fetchPoolData()
-    const interval = setInterval(fetchPoolData, 10000)
-    return () => clearInterval(interval)
-  }, [])
-
-useEffect(() => {
-  if (account) {
-    fetchPoolData()
-    fetchUserUSDC()
-    fetchUserSUI()
-    fetchUserTickets()
-    fetchUserLuck()
-    fetchJackpotBalances()
-    fetchSuilendStats()
   }
 
-  const interval = setInterval(() => {
-    fetchPoolData()
-    fetchJackpotBalances()
-    fetchSuilendStats()
-  }, 30000)
+  const handleWithdraw = async () => {
+    if (!account || !selectedTicket) {
+      setStatus('❌ Please select a ticket')
+      return
+    }
+    setLoading(true)
+    setStatus('Processing withdrawal...')
+    try {
+      const tx = new Transaction()
+      tx.moveCall({
+        target: `${PACKAGE_ID}::lottery_personal::request_withdrawal`,
+        typeArguments: [USDC_TYPE],
+        arguments: [
+          tx.object(POOL_ID),
+          tx.object(selectedTicket.objectId),
+          tx.object(CLOCK_ID)
+        ],
+      })
+      signAndExecute(
+        { transaction: tx },
+        {
+          onSuccess: (result) => {
+            console.log('Withdraw successful:', result)
+            setStatus('✅ Withdrawal successful!')
+            setSelectedTicket(null)
+            setTimeout(() => {
+              fetchUserUSDC()
+              fetchUserSUI()
+              fetchUserTickets()
+              fetchUserLuck()
+              fetchPoolData()
+              fetchJackpotBalances()
+              setLoading(false)
+            }, 2000)
+          },
+          onError: (error) => {
+            console.error('Withdraw failed:', error)
+            setStatus('❌ Withdrawal failed: ' + error.message)
+            setLoading(false)
+          },
+        }
+      )
+    } catch (error) {
+      console.error('Error:', error)
+      setStatus('❌ Error: ' + error.message)
+      setLoading(false)
+    }
+  }
 
-  return () => clearInterval(interval)
-}, [account])
+  const executeDraw = async (tier) => {
+    if (!account) return
+    setLoading(true)
+    setStatus(`Executing ${tier} draw...`)
+    try {
+      const tx = new Transaction()
+      const functionName = `execute_${tier}_draw`
+      tx.moveCall({
+        target: `${PACKAGE_ID}::lottery_personal::${functionName}`,
+        typeArguments: [USDC_TYPE],
+        arguments: [
+          tx.object(POOL_ID),
+          tx.object(JACKPOT_TIERS_ID),
+          tx.object(CLOCK_ID),
+          tx.object(RANDOM_ID)
+        ],
+      })
+      signAndExecute(
+        { transaction: tx },
+        {
+          onSuccess: (result) => {
+            console.log('Draw successful:', result)
+            setStatus(`✅ ${tier.charAt(0).toUpperCase() + tier.slice(1)} draw executed! Winner selected.`)
+            setTimeout(() => {
+              fetchJackpotBalances()
+              fetchPoolData()
+              setLoading(false)
+            }, 2000)
+          },
+          onError: (error) => {
+            console.error('Draw failed:', error)
+            setStatus('❌ Draw failed: ' + error.message)
+            setLoading(false)
+          },
+        }
+      )
+    } catch (error) {
+      console.error('Error:', error)
+      setStatus('❌ Error: ' + error.message)
+      setLoading(false)
+    }
+  }
+
   useEffect(() => {
+    fetchPoolData()
+    fetchJackpotBalances().catch(err => console.error('Jackpot fetch failed:', err))
+    fetchSuilendStats().catch(err => console.error('NAVI stats fetch failed:', err))
     if (account) {
       fetchUserUSDC()
       fetchUserSUI()
       fetchUserTickets()
-      fetchUserLuck()  // ADD THIS LINE
+      fetchUserLuck()
     }
+    const interval = setInterval(() => {
+      fetchPoolData()
+      fetchJackpotBalances().catch(err => console.error('Jackpot fetch failed:', err))
+      fetchSuilendStats().catch(err => console.error('NAVI stats fetch failed:', err))
+      if (account) {
+        fetchUserUSDC()
+        fetchUserSUI()
+        fetchUserTickets()
+        fetchUserLuck()
+      }
+    }, 30000)
+    return () => clearInterval(interval)
   }, [account])
 
-  const totalUSDC = userUSDC.reduce((sum, coin) => sum + parseInt(coin.balance), 0)
-  const luckMultiplier = userLuck?.level || 1
-  const totalTickets = userTickets.length
-  const totalEffectiveEntries = totalTickets * luckMultiplier
-
-const handleDeposit = async () => {
-  if (!account || !depositAmount || parseFloat(depositAmount) <= 0) {
-    setStatus('❌ Please enter a valid amount')
-    return
-  }
-
-  setLoading(true)
-
-  try {
-    // Auto-create luck if user doesn't have it
-    if (!userLuck) {
-      setStatus('Creating your luck profile...')
-      
-      const luckTx = new Transaction()
-      luckTx.moveCall({
-        target: `${PACKAGE_ID}::lottery_personal::create_my_luck`,
-        arguments: [luckTx.object(CLOCK_ID)]
-      })
-
-      await new Promise((resolve, reject) => {
-        signAndExecute(
-          { transaction: luckTx },
-          {
-            onSuccess: () => {
-              setTimeout(() => {
-                fetchUserLuck()
-                resolve()
-              }, 2000)
-            },
-            onError: (error) => {
-              console.error('Luck creation failed:', error)
-              reject(error)
-            }
-          }
-        )
-      })
-    }
-
-    setStatus('Processing deposit...')
-
-    const amountInMicroUSDC = Math.floor(parseFloat(depositAmount) * 1_000_000)
-    const usdcCoin = userUSDC.find(coin => coin.balance >= amountInMicroUSDC)
-
-    if (!usdcCoin) {
-      setStatus('❌ Insufficient USDC balance')
-      setLoading(false)
-      return
-    }
-
-    const tx = new Transaction()
-    const [coin] = tx.splitCoins(tx.object(usdcCoin.coinObjectId), [amountInMicroUSDC])
-
-    tx.moveCall({
-      target: `${PACKAGE_ID}::lottery_personal::deposit_smart`,
-      typeArguments: [USDC_TYPE],
-      arguments: [
-        tx.object(POOL_ID),
-        tx.sharedObjectRef({
-          objectId: DRAW_CONFIG_ID,
-          initialSharedVersion: 682525015,
-          mutable: false
-        }),
-        coin,
-        tx.object(CLOCK_ID)
-      ],
-    })
-
-    signAndExecute(
-      { transaction: tx },
-      {
-        onSuccess: (result) => {
-          console.log('Deposit successful:', result)
-          setStatus('✅ Deposit successful! Ticket created.')
-          setDepositAmount('')
-          setTimeout(() => {
-            fetchUserUSDC()
-            fetchUserSUI()
-            fetchUserTickets()
-            fetchUserLuck()
-            fetchPoolData()
-            fetchJackpotBalances()
-            setLoading(false)
-          }, 2000)
-        },
-        onError: (error) => {
-          console.error('Deposit failed:', error)
-          setStatus('❌ Deposit failed: ' + error.message)
-          setLoading(false)
-        },
-      }
-    )
-  } catch (error) {
-    console.error('Error:', error)
-    setStatus('❌ Error: ' + error.message)
-    setLoading(false)
-  }
-}
-
-const handleWithdraw = async () => {
-  if (!account || !selectedTicket) {
-    setStatus('❌ Please select a ticket first!')
-    return
-  }
-
-  setLoading(true)
-  setStatus('Withdrawing from pool...')
-
-  try {
-    const tx = new Transaction()
-
-    tx.moveCall({
-      target: `${PACKAGE_ID}::lottery_personal::withdraw`,
-      typeArguments: [USDC_TYPE],
-      arguments: [
-        tx.object(POOL_ID),
-        tx.object(selectedTicket),
-        tx.object(CLOCK_ID)
-      ],
-    })
-
-    signAndExecute(
-      { transaction: tx },
-      {
-onSuccess: (result) => {
-  console.log('Withdraw successful:', result)
-  setStatus('✅ Withdrawal successful!')
-  setTimeout(() => {
-    fetchUserUSDC()
-    fetchUserSUI()
-    fetchUserTickets()
-    fetchUserLuck()  // Make sure this is here
-    fetchPoolData()
-    fetchJackpotBalances()
-    setLoading(false)
-  }, 2000)
-},        onError: (error) => {
-          console.error('Withdrawal failed:', error)
-          setStatus('❌ Withdrawal failed: ' + error.message)
-          setLoading(false)
-        },
-      }
-    )
-  } catch (error) {
-    console.error('Error:', error)
-    setStatus('❌ Error: ' + error.message)
-    setLoading(false)
-  }
-}
-
-// Execute draw for specific tier
-const executeDraw = async (tier) => {
-  if (!account) return
-
-  setLoading(true)
-  setStatus(`Executing ${tier} draw...`)
-
-  try {
-    const tx = new Transaction()
-
-    const functionName = `execute_${tier}_draw`
-
-    tx.moveCall({
-      target: `${PACKAGE_ID}::lottery_personal::${functionName}`,
-      typeArguments: [USDC_TYPE],
-      arguments: [
-        tx.object(POOL_ID),
-        tx.object(JACKPOT_TIERS_ID),
-        tx.object(CLOCK_ID),
-        tx.object(RANDOM_ID)
-      ],
-    })
-
-    signAndExecute(
-      { transaction: tx },
-      {
-        onSuccess: (result) => {
-          console.log('Draw successful:', result)
-          setStatus(`✅ ${tier.charAt(0).toUpperCase() + tier.slice(1)} draw executed! Winner selected.`)
-          setTimeout(() => {
-            fetchJackpotBalances()
-            fetchPoolData()
-            setLoading(false)
-          }, 2000)
-        },
-        onError: (error) => {
-          console.error('Draw failed:', error)
-          setStatus('❌ Draw failed: ' + error.message)
-          setLoading(false)
-        },
-      }
-    )
-  } catch (error) {
-    console.error('Error:', error)
-    setStatus('❌ Error: ' + error.message)
-    setLoading(false)
-  }
-}
+  const totalUSDC = userUSDC.reduce((sum, coin) => sum + parseInt(coin.balance), 0) / 1_000_000
+  const totalSUI = userSUI.reduce((sum, coin) => sum + parseInt(coin.balance), 0) / 1_000_000_000
 
   return (
     <div style={{
       minHeight: '100vh',
-      background: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)',
-      padding: '40px 20px',
-      fontFamily: 'system-ui, -apple-system, sans-serif'
+      background: 'linear-gradient(135deg, #0a0e27 0%, #1a1f3a 50%, #0f1729 100%)',
+      color: '#e0e6ed',
+      fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif'
     }}>
-      <div style={{ maxWidth: '1000px', margin: '0 auto' }}>
-        <div style={{ textAlign: 'center', marginBottom: '40px' }}>
-          <h1 style={{
-            fontSize: '56px',
-            color: 'white',
-            margin: '0 0 10px 0',
-            textShadow: '2px 2px 4px rgba(0,0,0,0.3)',
-            fontWeight: 'bold'
-          }}>
-            🎰 LuckyVault
-          </h1>
-          <p style={{
-            fontSize: '24px',
-            color: 'rgba(255,255,255,0.95)',
-            margin: '0 0 20px 0',
-            fontWeight: '500'
-          }}>
-            The No-Loss Lottery on Sui
-          </p>
-        </div>
-
-        <div style={{ textAlign: 'center', marginBottom: '40px' }}>
+      <div style={{
+        background: 'rgba(10, 14, 39, 0.95)',
+        backdropFilter: 'blur(10px)',
+        borderBottom: '1px solid rgba(76, 209, 55, 0.2)',
+        padding: '20px 40px',
+        position: 'sticky',
+        top: 0,
+        zIndex: 100
+      }}>
+        <div style={{
+          maxWidth: '1400px',
+          margin: '0 auto',
+          display: 'flex',
+          justifyContent: 'space-between',
+          alignItems: 'center'
+        }}>
+          <div>
+            <h1 style={{
+              margin: 0,
+              fontSize: '32px',
+              fontWeight: 'bold',
+              background: 'linear-gradient(90deg, #4cd137 0%, #44bd32 100%)',
+              WebkitBackgroundClip: 'text',
+              WebkitTextFillColor: 'transparent',
+              display: 'flex',
+              alignItems: 'center',
+              gap: '10px'
+            }}>
+              🍀 LuckyVault
+            </h1>
+            <p style={{
+              margin: '5px 0 0 0',
+              fontSize: '18px',
+              color: '#4cd137',
+              fontWeight: 'bold',
+              letterSpacing: '1px'
+            }}>
+              The No-Loss Lottery
+            </p>
+            <p style={{
+              margin: '5px 0 0 0',
+              fontSize: '14px',
+              color: '#7f8fa6',
+              letterSpacing: '0.5px'
+            }}>
+              Save Money · Win Big · Zero Risk
+            </p>
+          </div>
           <ConnectButton />
         </div>
+      </div>
 
-        {/* Pause Status Banner */}
-        {poolData?.paused && (
+      <div style={{
+        maxWidth: '1400px',
+        margin: '0 auto',
+        padding: '40px 20px',
+      }}>
+        <>
           <div style={{
-            background: 'linear-gradient(135deg, #ef4444 0%, #dc2626 100%)',
-            borderRadius: '16px',
-            padding: '24px',
-            marginBottom: '30px',
-            boxShadow: '0 8px 24px rgba(239, 68, 68, 0.4)',
-            textAlign: 'center',
-            color: 'white'
-          }}>
-            <div style={{ fontSize: '48px', marginBottom: '12px' }}>⏸️</div>
-            <div style={{ fontSize: '24px', fontWeight: 'bold', marginBottom: '8px' }}>
-              Pool is Paused
-            </div>
-            <div style={{ fontSize: '16px', opacity: 0.9 }}>
-              Deposits disabled. Withdrawals still work!
-            </div>
-          </div>
-        )}
-
-
-{/* Draw Execution - Admin Only */}
-{account?.address === '0x01efafa2098e9cf9f89dfd16c11e07a05f89d4d745a466369aee195ae7d9acb4' && (
-  <div style={{
-    background: 'linear-gradient(135deg, #f093fb 0%, #f5576c 100%)',
-    padding: '30px',
-    borderRadius: '16px',
-    boxShadow: '0 8px 16px rgba(0,0,0,0.2)',
-    marginTop: '20px',
-    color: 'white'
-  }}>
-    <h2 style={{ marginBottom: '20px', fontSize: '24px', textAlign: 'center' }}>
-      🎲 Execute Draws (Admin)
-    </h2>
-    
-    <div style={{ 
-      display: 'grid', 
-      gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))',
-      gap: '15px'
-    }}>
-      {/* Hourly Draw Button */}
-      <button
-        onClick={() => executeDraw('hourly')}
-        disabled={loading || Date.now() < nextDrawTimes.hourly}
-        style={{
-          padding: '15px 20px',
-          fontSize: '16px',
-          fontWeight: 'bold',
-          background: Date.now() >= nextDrawTimes.hourly ? '#43e97b' : '#cccccc',
-          color: 'white',
-          border: 'none',
-          borderRadius: '12px',
-          cursor: Date.now() >= nextDrawTimes.hourly ? 'pointer' : 'not-allowed'
-        }}
-      >
-        ⚡ Draw Hourly
-        <div style={{ fontSize: '12px', marginTop: '5px' }}>
-          ${(jackpotBalances.hourly / 1_000_000).toFixed(2)}
-        </div>
-      </button>
-
-      {/* Daily Draw Button */}
-      <button
-        onClick={() => executeDraw('daily')}
-        disabled={loading || Date.now() < nextDrawTimes.daily}
-        style={{
-          padding: '15px 20px',
-          fontSize: '16px',
-          fontWeight: 'bold',
-          background: Date.now() >= nextDrawTimes.daily ? '#4facfe' : '#cccccc',
-          color: 'white',
-          border: 'none',
-          borderRadius: '12px',
-          cursor: Date.now() >= nextDrawTimes.daily ? 'pointer' : 'not-allowed'
-        }}
-      >
-        ☀️ Draw Daily
-        <div style={{ fontSize: '12px', marginTop: '5px' }}>
-          ${(jackpotBalances.daily / 1_000_000).toFixed(2)}
-        </div>
-      </button>
-
-      {/* Weekly Draw Button */}
-      <button
-        onClick={() => executeDraw('weekly')}
-        disabled={loading || Date.now() < nextDrawTimes.weekly}
-        style={{
-          padding: '15px 20px',
-          fontSize: '16px',
-          fontWeight: 'bold',
-          background: Date.now() >= nextDrawTimes.weekly ? '#667eea' : '#cccccc',
-          color: 'white',
-          border: 'none',
-          borderRadius: '12px',
-          cursor: Date.now() >= nextDrawTimes.weekly ? 'pointer' : 'not-allowed'
-        }}
-      >
-        🌟 Draw Weekly
-        <div style={{ fontSize: '12px', marginTop: '5px' }}>
-          ${(jackpotBalances.weekly / 1_000_000).toFixed(2)}
-        </div>
-      </button>
-
-      {/* Monthly Draw Button */}
-      <button
-        onClick={() => executeDraw('monthly')}
-        disabled={loading || Date.now() < nextDrawTimes.monthly}
-        style={{
-          padding: '15px 20px',
-          fontSize: '16px',
-          fontWeight: 'bold',
-          background: Date.now() >= nextDrawTimes.monthly ? '#fa709a' : '#cccccc',
-          color: 'white',
-          border: 'none',
-          borderRadius: '12px',
-          cursor: Date.now() >= nextDrawTimes.monthly ? 'pointer' : 'not-allowed'
-        }}
-      >
-        💎 Draw Monthly
-        <div style={{ fontSize: '12px', marginTop: '5px' }}>
-          ${(jackpotBalances.monthly / 1_000_000).toFixed(2)}
-        </div>
-      </button>
-    </div>
-  </div>
-)}
-
-
-
-{/* Jackpot Tiers Display */}
-<div style={{
-  background: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)',
-  padding: '30px',
-  borderRadius: '16px',
-  boxShadow: '0 8px 16px rgba(0,0,0,0.2)',
-  marginBottom: '20px',
-  color: 'white'
-}}>
-  <h2 style={{ marginBottom: '25px', fontSize: '28px', textAlign: 'center' }}>
-    🎰 Jackpot Prizes
-  </h2>
-  
-  <div style={{ 
-    display: 'grid', 
-    gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))',
-    gap: '15px'
-  }}>
-    {/* Hourly Jackpot */}
-    <div style={{
-      background: 'rgba(255,255,255,0.15)',
-      padding: '20px',
-      borderRadius: '12px',
-      backdropFilter: 'blur(10px)'
-    }}>
-      <div style={{ fontSize: '24px', marginBottom: '5px' }}>⚡ Hourly</div>
-      <div style={{ fontSize: '32px', fontWeight: 'bold', marginBottom: '10px' }}>
-        ${(jackpotBalances.hourly / 1_000_000).toFixed(2)}
-      </div>
-      <div style={{ fontSize: '14px', opacity: 0.9 }}>
-        Next: {getTimeUntil(nextDrawTimes.hourly)}
-      </div>
-    </div>
-
-    {/* Daily Jackpot */}
-    <div style={{
-      background: 'rgba(255,255,255,0.15)',
-      padding: '20px',
-      borderRadius: '12px',
-      backdropFilter: 'blur(10px)'
-    }}>
-      <div style={{ fontSize: '24px', marginBottom: '5px' }}>☀️ Daily</div>
-      <div style={{ fontSize: '32px', fontWeight: 'bold', marginBottom: '10px' }}>
-        ${(jackpotBalances.daily / 1_000_000).toFixed(2)}
-      </div>
-      <div style={{ fontSize: '14px', opacity: 0.9 }}>
-        Next: {getTimeUntil(nextDrawTimes.daily)}
-      </div>
-    </div>
-
-    {/* Weekly Jackpot */}
-    <div style={{
-      background: 'rgba(255,255,255,0.15)',
-      padding: '20px',
-      borderRadius: '12px',
-      backdropFilter: 'blur(10px)'
-    }}>
-      <div style={{ fontSize: '24px', marginBottom: '5px' }}>🌟 Weekly</div>
-      <div style={{ fontSize: '32px', fontWeight: 'bold', marginBottom: '10px' }}>
-        ${(jackpotBalances.weekly / 1_000_000).toFixed(2)}
-      </div>
-      <div style={{ fontSize: '14px', opacity: 0.9 }}>
-        Next: {getTimeUntil(nextDrawTimes.weekly)}
-      </div>
-    </div>
-
-    {/* Monthly Jackpot */}
-    <div style={{
-      background: 'rgba(255,255,255,0.15)',
-      padding: '20px',
-      borderRadius: '12px',
-      backdropFilter: 'blur(10px)'
-    }}>
-      <div style={{ fontSize: '24px', marginBottom: '5px' }}>💎 Monthly</div>
-      <div style={{ fontSize: '32px', fontWeight: 'bold', marginBottom: '10px' }}>
-        ${(jackpotBalances.monthly / 1_000_000).toFixed(2)}
-      </div>
-      <div style={{ fontSize: '14px', opacity: 0.9 }}>
-        Next: {getTimeUntil(nextDrawTimes.monthly)}
-      </div>
-    </div>
-  </div>
-</div>
-{/* Pool Stats Dashboard */}
-<div style={{
-  background: 'white',
-  padding: '30px',
-  borderRadius: '16px',
-  boxShadow: '0 4px 6px rgba(0,0,0,0.1)',
-  marginBottom: '20px'
-}}>
-  <h2 style={{ marginBottom: '20px', fontSize: '24px' }}>📊 Pool Statistics</h2>
-  
-  <div style={{ 
-    display: 'grid', 
-    gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))',
-    gap: '20px'
-  }}>
-    {/* Total Pool Balance */}
-    <div style={{
-      padding: '15px',
-      background: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)',
-      borderRadius: '12px',
-      color: 'white'
-    }}>
-      <div style={{ fontSize: '14px', opacity: 0.9, marginBottom: '5px' }}>
-        💰 Pool Balance
-      </div>
-      <div style={{ fontSize: '28px', fontWeight: 'bold' }}>
-        ${((poolData?.balance || 0) / 1_000_000).toFixed(2)}
-      </div>
-    </div>
-
-    {/* Total Deposited */}
-    <div style={{
-      padding: '15px',
-      background: 'linear-gradient(135deg, #f093fb 0%, #f5576c 100%)',
-      borderRadius: '12px',
-      color: 'white'
-    }}>
-      <div style={{ fontSize: '14px', opacity: 0.9, marginBottom: '5px' }}>
-        💎 Total Deposited
-      </div>
-      <div style={{ fontSize: '28px', fontWeight: 'bold' }}>
-        ${((poolData?.totalDeposited || 0) / 1_000_000).toFixed(2)}
-      </div>
-    </div>
-
-    {/* In Suilend */}
-    <div style={{
-      padding: '15px',
-      background: 'linear-gradient(135deg, #4facfe 0%, #00f2fe 100%)',
-      borderRadius: '12px',
-      color: 'white'
-    }}>
-      <div style={{ fontSize: '14px', opacity: 0.9, marginBottom: '5px' }}>
-        🏦 In Suilend
-      </div>
-      <div style={{ fontSize: '28px', fontWeight: 'bold' }}>
-        ${(suilendStats.deposited / 1_000_000).toFixed(2)}
-      </div>
-    </div>
-
-    {/* Yield Earned */}
-    <div style={{
-      padding: '15px',
-      background: 'linear-gradient(135deg, #43e97b 0%, #38f9d7 100%)',
-      borderRadius: '12px',
-      color: 'white'
-    }}>
-      <div style={{ fontSize: '14px', opacity: 0.9, marginBottom: '5px' }}>
-        📈 Yield Earned
-      </div>
-      <div style={{ fontSize: '28px', fontWeight: 'bold' }}>
-        ${(suilendStats.yieldEarned / 1_000_000).toFixed(2)}
-      </div>
-    </div>
-
-    {/* Total Users */}
-    <div style={{
-      padding: '15px',
-      background: 'linear-gradient(135deg, #fa709a 0%, #fee140 100%)',
-      borderRadius: '12px',
-      color: 'white'
-    }}>
-      <div style={{ fontSize: '14px', opacity: 0.9, marginBottom: '5px' }}>
-        👥 Total Users
-      </div>
-      <div style={{ fontSize: '28px', fontWeight: 'bold' }}>
-        {poolData?.whitelistSize || 0}
-      </div>
-    </div>
-
-    {/* Current APY */}
-    <div style={{
-      padding: '15px',
-      background: 'linear-gradient(135deg, #30cfd0 0%, #330867 100%)',
-      borderRadius: '12px',
-      color: 'white'
-    }}>
-      <div style={{ fontSize: '14px', opacity: 0.9, marginBottom: '5px' }}>
-        💹 Current APY
-      </div>
-      <div style={{ fontSize: '28px', fontWeight: 'bold' }}>
-        11.69%
-      </div>
-    </div>
-  </div>
-</div>
-        {account?.address === '0x01efafa2098e9cf9f89dfd16c11e07a05f89d4d745a466369aee195ae7d9acb4' && (
-          <AdminPanel isPaused={poolData?.paused || false} onSuccess={() => fetchPoolData()} />
-        )}
-
-        {userLuck ? (
-          <LuckMeter userAddress={account.address} onLuckLoaded={setUserLuck} />
-        ) : (
-          <div style={{
-            background: 'white',
-            borderRadius: '20px',
-            padding: '20px',
-            marginBottom: '20px',
-            textAlign: 'center'
-          }}>
-            Your luck profile will be created automatically on first deposit
-          </div>
-        )}
-
-        {(
-          <div style={{
-            background: 'white',
-            borderRadius: '20px',
-            padding: '30px',
-            marginBottom: '30px',
-            boxShadow: '0 20px 60px rgba(0,0,0,0.15)'
-          }}>
-            <h2 style={{ marginTop: 0, color: '#333', fontSize: '28px', marginBottom: '20px' }}>💰 Your Balance</h2>
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '20px', marginBottom: '20px' }}>
-              <div style={{
-                background: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)',
-                padding: '20px',
-                borderRadius: '16px',
-                color: 'white'
-              }}>
-                <div style={{ fontSize: '14px', opacity: 0.9, marginBottom: '8px' }}>💎 SUI</div>
-                <div style={{ fontSize: '28px', fontWeight: 'bold' }}>
-                  {(parseFloat(userSUI) / 1_000_000_000).toFixed(4)} SUI
-                </div>
-              </div>
-              <div style={{
-                background: 'linear-gradient(135deg, #10b981 0%, #059669 100%)',
-                padding: '20px',
-                borderRadius: '16px',
-                color: 'white'
-              }}>
-                <div style={{ fontSize: '14px', opacity: 0.9, marginBottom: '8px' }}>💵 USDC</div>
-                <div style={{ fontSize: '28px', fontWeight: 'bold' }}>
-                  {(totalUSDC / 1_000_000).toFixed(6)} USDC
-                </div>
-              </div>
-            </div>
-            <div style={{
-              fontSize: '16px',
-              color: '#666',
-              padding: '16px',
-              background: '#f3f4f6',
-              borderRadius: '12px',
-              display: 'grid',
-              gridTemplateColumns: '1fr 1fr',
-              gap: '16px'
-            }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-                <span>🎫 Tickets</span>
-                <span style={{ fontWeight: 'bold', color: '#667eea', fontSize: '20px' }}>{totalTickets}</span>
-              </div>
-              <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-                <span>🍀 Entries</span>
-                <span style={{ fontWeight: 'bold', color: '#10b981', fontSize: '20px' }}>{totalEffectiveEntries}</span>
-              </div>
-            </div>
-          </div>
-        )}
-
-        <SuilendStats userAddress={account?.address} refreshInterval={30000} />
-
-        {(
-          <div style={{
-            background: 'white',
-            borderRadius: '20px',
+            background: 'linear-gradient(135deg, rgba(68, 189, 50, 0.15) 0%, rgba(76, 209, 55, 0.05) 100%)',
+            border: '2px solid rgba(76, 209, 55, 0.3)',
+            borderRadius: '24px',
             padding: '40px',
             marginBottom: '30px',
-            boxShadow: '0 20px 60px rgba(0,0,0,0.15)'
+            textAlign: 'center',
+            position: 'relative',
+            overflow: 'hidden'
           }}>
-            <h2 style={{ marginTop: 0, color: '#333', fontSize: '32px' }}>💰 Deposit USDC</h2>
-            <p style={{ color: '#666', marginBottom: '20px', fontSize: '16px' }}>
-              Each ticket gets <strong>{luckMultiplier}x entries</strong>!
-            </p>
-            <div style={{ marginBottom: '20px' }}>
-              <input
-                type="number"
-                step="0.000001"
-                placeholder="Amount (USDC)"
-                value={depositAmount}
-                onChange={(e) => setDepositAmount(e.target.value)}
-                style={{
-                  width: '100%',
-                  padding: '16px',
-                  fontSize: '18px',
-                  border: '2px solid #e5e7eb',
-                  borderRadius: '12px',
-                  boxSizing: 'border-box'
-                }}
-              />
+            <div style={{
+              position: 'absolute',
+              top: 0,
+              left: 0,
+              right: 0,
+              bottom: 0,
+              background: 'radial-gradient(circle at 50% 50%, rgba(76, 209, 55, 0.1) 0%, transparent 70%)',
+              pointerEvents: 'none'
+            }}></div>
+            <div style={{
+              fontSize: '16px',
+              color: '#4cd137',
+              fontWeight: 'bold',
+              letterSpacing: '2px',
+              marginBottom: '15px'
+            }}>
+              💎 MONTHLY ULTRA JACKPOT 💎
             </div>
-            <button
-              onClick={handleDeposit}
-  disabled={!account || loading}
-              disabled={loading || !depositAmount || parseFloat(depositAmount) <= 0 || poolData?.paused}
-              style={{
-                width: '100%',
-                padding: '18px',
-                fontSize: '20px',
-                fontWeight: 'bold',
-                color: 'white',
-                background: (loading || poolData?.paused) ? '#9ca3af' : 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)',
-                border: 'none',
-                borderRadius: '12px',
-                cursor: (loading || poolData?.paused) ? 'not-allowed' : 'pointer'
-              }}
-            >
-              {loading ? '⏳ Processing...' : poolData?.paused ? '⏸️ Paused' : `🎲 Get ${luckMultiplier}x Entries`}
-            </button>
+            <div style={{
+              fontSize: '56px',
+              fontWeight: 'bold',
+              color: '#fff',
+              marginBottom: '10px',
+              textShadow: '0 0 30px rgba(76, 209, 55, 0.5)'
+            }}>
+              ${(jackpotBalances.monthly / 1_000_000).toFixed(2)}
+            </div>
+            <div style={{
+              fontSize: '14px',
+              color: '#7f8fa6'
+            }}>
+              Next draw: {getTimeUntil(nextDrawTimes.monthly)}
+            </div>
           </div>
-        )}
 
-{userTickets.length > 0 && (
-  <div style={{
-    background: 'white',
-    padding: '30px',
-    borderRadius: '16px',
-    boxShadow: '0 4px 6px rgba(0,0,0,0.1)',
-    marginTop: '20px'
-  }}>
-    <h3 style={{ marginBottom: '20px', fontSize: '24px' }}>💰 Withdraw Funds</h3>
-    
-    <div style={{ marginBottom: '20px' }}>
-      <label style={{ 
-        display: 'block', 
-        marginBottom: '10px',
-        fontWeight: '600',
-        fontSize: '16px'
+          <div style={{
+            background: 'rgba(26, 31, 58, 0.5)',
+            border: '1px solid rgba(76, 209, 55, 0.2)',
+            borderRadius: '24px',
+            padding: '30px',
+            marginBottom: '30px',
+            backdropFilter: 'blur(10px)'
+          }}>
+            <h2 style={{
+              fontSize: '20px',
+              marginBottom: '25px',
+              textAlign: 'center',
+              color: '#4cd137',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              gap: '10px'
+            }}>
+              🍀 ACTIVE PRIZE POOLS 🍀
+            </h2>
+
+            <div style={{
+              display: 'grid',
+              gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))',
+              gap: '20px'
+            }}>
+              {[
+                { tier: 'hourly', emoji: '⚡', label: 'HOURLY', amount: jackpotBalances.hourly, time: nextDrawTimes.hourly },
+                { tier: 'daily', emoji: '☀️', label: 'DAILY', amount: jackpotBalances.daily, time: nextDrawTimes.daily },
+                { tier: 'weekly', emoji: '🌟', label: 'WEEKLY', amount: jackpotBalances.weekly, time: nextDrawTimes.weekly },
+                { tier: 'monthly', emoji: '💎', label: 'MONTHLY', amount: jackpotBalances.monthly, time: nextDrawTimes.monthly }
+              ].map(pool => (
+                <div key={pool.tier} style={{
+                  background: 'rgba(15, 23, 42, 0.8)',
+                  border: '1px solid rgba(76, 209, 55, 0.3)',
+                  borderRadius: '16px',
+                  padding: '20px',
+                  textAlign: 'center',
+                  transition: 'transform 0.3s, border-color 0.3s',
+                  cursor: 'pointer'
+                }}>
+                  <div style={{ fontSize: '28px', marginBottom: '8px' }}>{pool.emoji}</div>
+                  <div style={{ fontSize: '14px', color: '#7f8fa6', marginBottom: '10px' }}>{pool.label}</div>
+                  <div style={{
+                    fontSize: '28px',
+                    fontWeight: 'bold',
+                    color: '#fff',
+                    marginBottom: '8px'
+                  }}>
+                    ${(pool.amount / 1_000_000).toFixed(2)}
+                  </div>
+                  <div style={{
+                    fontSize: '12px',
+                    color: '#4cd137',
+                    background: 'rgba(76, 209, 55, 0.1)',
+                    padding: '6px 12px',
+                    borderRadius: '8px'
+                  }}>
+                    {getTimeUntil(pool.time)}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '30px', marginBottom: '30px' }}>
+            <div>
+              <div style={{
+                background: 'rgba(26, 31, 58, 0.5)',
+                border: '1px solid rgba(76, 209, 55, 0.2)',
+                borderRadius: '24px',
+                padding: '30px',
+                marginBottom: '20px',
+                backdropFilter: 'blur(10px)'
+              }}>
+                <h3 style={{
+                  fontSize: '18px',
+                  marginBottom: '20px',
+                  color: '#fff'
+                }}>
+                  💰 Deposit USDC
+                </h3>
+
+                <div style={{ marginBottom: '20px' }}>
+                  <div style={{
+                    display: 'flex',
+                    justifyContent: 'space-between',
+                    marginBottom: '8px',
+                    fontSize: '14px',
+                    color: '#7f8fa6'
+                  }}>
+                    <span>Your Balance</span>
+                    <span style={{ color: '#4cd137' }}>{totalUSDC.toFixed(2)} USDC</span>
+                  </div>
+
+                  <input
+                    type="number"
+                    value={depositAmount}
+                    onChange={(e) => setDepositAmount(e.target.value)}
+                    placeholder="0.00"
+                    style={{
+                      width: '100%',
+                      padding: '16px',
+                      fontSize: '18px',
+                      background: 'rgba(15, 23, 42, 0.8)',
+                      border: '1px solid rgba(76, 209, 55, 0.3)',
+                      borderRadius: '12px',
+                      color: '#fff',
+                      outline: 'none',
+                      transition: 'border-color 0.3s'
+                    }}
+                    onFocus={(e) => e.target.style.borderColor = '#4cd137'}
+                    onBlur={(e) => e.target.style.borderColor = 'rgba(76, 209, 55, 0.3)'}
+                  />
+                </div>
+
+                <button
+                  onClick={handleDeposit}
+                  disabled={loading || !depositAmount || !account}
+                  style={{
+                    width: '100%',
+                    padding: '16px',
+                    fontSize: '16px',
+                    fontWeight: 'bold',
+                    background: (loading || !depositAmount || !account) ? 'rgba(127, 143, 166, 0.3)' : 'linear-gradient(135deg, #4cd137 0%, #44bd32 100%)',
+                    color: '#fff',
+                    border: 'none',
+                    borderRadius: '12px',
+                    cursor: (loading || !depositAmount || !account) ? 'not-allowed' : 'pointer',
+                    transition: 'transform 0.2s, box-shadow 0.2s',
+                    boxShadow: '0 4px 15px rgba(76, 209, 55, 0.3)'
+                  }}
+                >
+                  {!account ? '🔒 Connect Wallet to Deposit' : loading ? '⏳ Processing...' : '💰 Deposit & Win'}
+                </button>
+              </div>
+
+              <div style={{
+                background: 'rgba(26, 31, 58, 0.5)',
+                border: '1px solid rgba(76, 209, 55, 0.2)',
+                borderRadius: '24px',
+                padding: '30px',
+                marginBottom: '20px',
+                backdropFilter: 'blur(10px)'
+              }}>
+                <h3 style={{
+                  fontSize: '18px',
+                  marginBottom: '20px',
+                  color: '#fff'
+                }}>
+                  📊 Your Stats
+                </h3>
+
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '15px' }}>
+                  <div style={{
+                    display: 'flex',
+                    justifyContent: 'space-between',
+                    padding: '12px 16px',
+                    background: 'rgba(15, 23, 42, 0.8)',
+                    borderRadius: '10px',
+                    border: '1px solid rgba(76, 209, 55, 0.2)'
+                  }}>
+                    <span style={{ color: '#7f8fa6' }}>Active Tickets</span>
+                    <span style={{ color: '#4cd137', fontWeight: 'bold' }}>{userTickets.length}</span>
+                  </div>
+
+                  <div style={{
+                    display: 'flex',
+                    justifyContent: 'space-between',
+                    padding: '12px 16px',
+                    background: 'rgba(15, 23, 42, 0.8)',
+                    borderRadius: '10px',
+                    border: '1px solid rgba(76, 209, 55, 0.2)'
+                  }}>
+                    <span style={{ color: '#7f8fa6' }}>Total Deposited</span>
+                    <span style={{ color: '#4cd137', fontWeight: 'bold' }}>
+                      ${(userTickets.reduce((sum, t) => sum + parseInt(t.amount), 0) / 1_000_000).toFixed(2)}
+                    </span>
+                  </div>
+
+                  <div style={{
+                    display: 'flex',
+                    justifyContent: 'space-between',
+                    padding: '12px 16px',
+                    background: 'rgba(15, 23, 42, 0.8)',
+                    borderRadius: '10px',
+                    border: '1px solid rgba(76, 209, 55, 0.2)'
+                  }}>
+                    <span style={{ color: '#7f8fa6' }}>USDC Balance</span>
+                    <span style={{ color: '#fff', fontWeight: 'bold' }}>{totalUSDC.toFixed(2)}</span>
+                  </div>
+                </div>
+              </div>
+
+              <LuckMeter userAddress={account?.address} onLuckLoaded={setUserLuck} />
+            </div>
+
+            <div>
+              <div style={{
+                background: 'rgba(26, 31, 58, 0.5)',
+                border: '1px solid rgba(76, 209, 55, 0.2)',
+                borderRadius: '24px',
+                padding: '30px',
+                marginBottom: '20px',
+                backdropFilter: 'blur(10px)'
+              }}>
+                <h3 style={{
+                  fontSize: '18px',
+                  marginBottom: '20px',
+                  color: '#fff'
+                }}>
+                  💸 Withdraw Funds
+                </h3>
+
+                <div style={{
+                  padding: '12px 16px',
+                  marginBottom: '20px',
+                  background: 'rgba(52, 152, 219, 0.1)',
+                  borderRadius: '12px',
+                  border: '1px solid rgba(52, 152, 219, 0.3)',
+                  fontSize: '13px',
+                  color: 'rgba(255,255,255,0.8)',
+                  lineHeight: '1.5'
+                }}>
+                  ℹ️ <strong>Note:</strong> If pool balance is insufficient, funds will be automatically withdrawn from NAVI.
+                  This process may take up to 30 seconds. Please retry if your withdrawal fails initially.
+                </div>
+
+                {userTickets.length === 0 ? (
+                  <div style={{
+                    textAlign: 'center',
+                    padding: '30px',
+                    color: '#7f8fa6'
+                  }}>
+                    No active tickets to withdraw
+                  </div>
+                ) : (
+                  <>
+                    <div style={{
+                      maxHeight: '200px',
+                      overflowY: 'auto',
+                      marginBottom: '20px',
+                      padding: '10px'
+                    }}>
+                      {userTickets.map((ticket) => (
+                        <div
+                          key={ticket.objectId}
+                          onClick={() => setSelectedTicket(ticket)}
+                          style={{
+                            padding: '15px',
+                            marginBottom: '10px',
+                            background: selectedTicket?.objectId === ticket.objectId
+                              ? 'rgba(76, 209, 55, 0.2)'
+                              : 'rgba(15, 23, 42, 0.8)',
+                            border: selectedTicket?.objectId === ticket.objectId
+                              ? '2px solid #4cd137'
+                              : '1px solid rgba(76, 209, 55, 0.3)',
+                            borderRadius: '12px',
+                            cursor: 'pointer',
+                            transition: 'all 0.3s'
+                          }}
+                        >
+                          <div style={{
+                            display: 'flex',
+                            justifyContent: 'space-between',
+                            alignItems: 'center'
+                          }}>
+                            <span style={{ color: '#fff', fontWeight: 'bold' }}>
+                              ${(parseInt(ticket.amount) / 1_000_000).toFixed(2)}
+                            </span>
+                            <span style={{
+                              fontSize: '12px',
+                              color: '#7f8fa6'
+                            }}>
+                              Ticket #{ticket.objectId.slice(-6)}
+                            </span>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+
+                    <button
+                      onClick={handleWithdraw}
+                      disabled={!selectedTicket || loading || !account}
+                      style={{
+                        width: '100%',
+                        padding: '16px',
+                        fontSize: '16px',
+                        fontWeight: 'bold',
+                        background: (!selectedTicket || loading || !account)
+                          ? 'rgba(127, 143, 166, 0.3)'
+                          : 'linear-gradient(135deg, #e74c3c 0%, #c0392b 100%)',
+                        color: '#fff',
+                        border: 'none',
+                        borderRadius: '12px',
+                        cursor: (!selectedTicket || loading || !account) ? 'not-allowed' : 'pointer',
+                        transition: 'transform 0.2s, box-shadow 0.2s'
+                      }}
+                    >
+                      {!account ? '🔒 Connect Wallet' : loading ? '⏳ Processing...' : '💸 Withdraw'}
+                    </button>
+                  </>
+                )}
+              </div>
+
+              <div style={{
+                background: 'rgba(26, 31, 58, 0.5)',
+                border: '1px solid rgba(76, 209, 55, 0.2)',
+                borderRadius: '24px',
+                padding: '30px',
+                backdropFilter: 'blur(10px)'
+              }}>
+                <h3 style={{
+                  fontSize: '18px',
+                  marginBottom: '20px',
+                  color: '#fff'
+                }}>
+                  🌐 Platform Stats
+                </h3>
+
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '15px' }}>
+                  <div style={{
+                    display: 'flex',
+                    justifyContent: 'space-between',
+                    padding: '12px 16px',
+                    background: 'rgba(15, 23, 42, 0.8)',
+                    borderRadius: '10px',
+                    border: '1px solid rgba(76, 209, 55, 0.2)'
+                  }}>
+                    <span style={{ color: '#7f8fa6' }}>Total Deposited</span>
+                    <span style={{ color: '#4cd137', fontWeight: 'bold' }}>
+                      ${((poolData?.totalDeposited || 0) / 1_000_000).toFixed(2)}
+                    </span>
+                  </div>
+
+                  <div style={{
+                    display: 'flex',
+                    justifyContent: 'space-between',
+                    padding: '12px 16px',
+                    background: 'rgba(15, 23, 42, 0.8)',
+                    borderRadius: '10px',
+                    border: '1px solid rgba(76, 209, 55, 0.2)'
+                  }}>
+                    <span style={{ color: '#7f8fa6' }}>In NAVI</span>
+                    <span style={{ color: '#fff', fontWeight: 'bold' }}>
+                      ${(suilendStats.deposited / 1_000_000).toFixed(2)}
+                    </span>
+                  </div>
+                  <div style={{
+                    display: 'flex',
+                    justifyContent: 'space-between',
+                    padding: '12px 16px',
+                    background: 'rgba(15, 23, 42, 0.8)',
+                    borderRadius: '10px',
+                    border: '1px solid rgba(76, 209, 55, 0.2)'
+                  }}>
+                    <span style={{ color: '#7f8fa6' }}>Yield Earned</span>
+                    <span style={{ color: '#4cd137', fontWeight: 'bold' }}>
+                      ${(suilendStats.yieldEarned / 1_000_000).toFixed(2)}
+                    </span>
+                  </div>
+
+                  <div style={{
+                    display: 'flex',
+                    justifyContent: 'space-between',
+                    padding: '12px 16px',
+                    background: 'rgba(15, 23, 42, 0.8)',
+                    borderRadius: '10px',
+                    border: '1px solid rgba(76, 209, 55, 0.2)'
+                  }}>
+                    <span style={{ color: '#7f8fa6' }}>Current APY</span>
+                    <span style={{ color: '#4cd137', fontWeight: 'bold' }}>
+                      {apyLoading ? '...' : naviAPY.toFixed(2)}%
+                    </span>
+                  </div>
+
+                  <div style={{
+                    padding: '10px 12px',
+                    background: 'rgba(76, 209, 55, 0.05)',
+                    borderRadius: '8px',
+                    border: '1px solid rgba(76, 209, 55, 0.15)',
+                    fontSize: '11px',
+                    color: '#7f8fa6',
+                    lineHeight: '1.4'
+                  }}>
+                    ℹ️ Real-time APY from NAVI Protocol. Updates every 5 minutes.
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          {account?.address === '0x9d1d93f595fbfc241d1a25c864d195bd401ba814368178e7fa5a21e552014382' && (
+            <div style={{
+              background: 'rgba(26, 31, 58, 0.5)',
+              border: '1px solid rgba(231, 76, 60, 0.3)',
+              borderRadius: '24px',
+              padding: '30px',
+              marginTop: '30px',
+              backdropFilter: 'blur(10px)'
+            }}>
+              <h3 style={{
+                fontSize: '18px',
+                marginBottom: '20px',
+                color: '#e74c3c',
+                textAlign: 'center'
+              }}>
+                🎲 Execute Draws (Admin Only)
+              </h3>
+
+              <div style={{
+                display: 'grid',
+                gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))',
+                gap: '15px'
+              }}>
+                {[
+                  { tier: 'hourly', emoji: '⚡', label: 'Hourly Draw', amount: jackpotBalances.hourly, time: nextDrawTimes.hourly },
+                  { tier: 'daily', emoji: '☀️', label: 'Daily Draw', amount: jackpotBalances.daily, time: nextDrawTimes.daily },
+                  { tier: 'weekly', emoji: '🌟', label: 'Weekly Draw', amount: jackpotBalances.weekly, time: nextDrawTimes.weekly },
+                  { tier: 'monthly', emoji: '💎', label: 'Monthly Draw', amount: jackpotBalances.monthly, time: nextDrawTimes.monthly }
+                ].map(draw => (
+                  <button
+                    key={draw.tier}
+                    onClick={() => executeDraw(draw.tier)}
+                    disabled={loading || Date.now() < draw.time}
+                    style={{
+                      padding: '20px',
+                      fontSize: '16px',
+                      fontWeight: 'bold',
+                      background: Date.now() >= draw.time
+                        ? 'linear-gradient(135deg, #4cd137 0%, #44bd32 100%)'
+                        : 'rgba(127, 143, 166, 0.3)',
+                      color: '#fff',
+                      border: 'none',
+                      borderRadius: '12px',
+                      cursor: Date.now() >= draw.time ? 'pointer' : 'not-allowed',
+                      transition: 'transform 0.2s'
+                    }}
+                  >
+                    {draw.emoji} {draw.label}
+                    <div style={{ fontSize: '14px', marginTop: '8px', opacity: 0.9 }}>
+                      ${(draw.amount / 1_000_000).toFixed(2)}
+                    </div>
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {status && (
+            <div style={{
+              marginTop: '20px',
+              padding: '16px',
+              background: status.includes('✅')
+                ? 'rgba(76, 209, 55, 0.2)'
+                : status.includes('❌')
+                ? 'rgba(231, 76, 60, 0.2)'
+                : 'rgba(127, 143, 166, 0.2)',
+              border: `1px solid ${status.includes('✅')
+                ? 'rgba(76, 209, 55, 0.5)'
+                : status.includes('❌')
+                ? 'rgba(231, 76, 60, 0.5)'
+                : 'rgba(127, 143, 166, 0.5)'}`,
+              borderRadius: '12px',
+              color: '#fff',
+              textAlign: 'center',
+              fontSize: '14px'
+            }}>
+              {status}
+            </div>
+          )}
+        </>
+      </div>
+
+      <div style={{
+        textAlign: 'center',
+        padding: '40px 20px',
+        color: '#7f8fa6',
+        fontSize: '14px',
+        borderTop: '1px solid rgba(76, 209, 55, 0.2)'
       }}>
-        Select Ticket to Withdraw:
-      </label>
-      <select 
-        value={selectedTicket || ''} 
-        onChange={(e) => setSelectedTicket(e.target.value)}
-        style={{
-          padding: '12px',
-          fontSize: '16px',
-          border: '2px solid #e0e0e0',
-          borderRadius: '8px',
-          width: '100%',
-          cursor: 'pointer'
-        }}
-      >
-        <option value="">-- Select a ticket --</option>
-        {userTickets.map(ticket => (
-          <option key={ticket.objectId} value={ticket.objectId}>
-            💎 {(ticket.amount / 1_000_000).toFixed(2)} USDC
-          </option>
-        ))}
-      </select>
-    </div>
-
-    <button
-      onClick={handleWithdraw}
-      disabled={loading || !selectedTicket}
-      style={{
-        padding: '15px 30px',
-        fontSize: '18px',
-        fontWeight: 'bold',
-        background: (!selectedTicket || loading) ? '#cccccc' : 'linear-gradient(135deg, #f093fb 0%, #f5576c 100%)',
-        color: 'white',
-        border: 'none',
-        borderRadius: '12px',
-        cursor: (!selectedTicket || loading) ? 'not-allowed' : 'pointer',
-        width: '100%'
-      }}
-    >
-      {loading ? '⏳ Processing...' : '💰 Withdraw'}
-
-</button>
-  </div>
-)}
+        <p style={{ margin: 0 }}>
+          🍀 LuckyVault - Where Everyone Wins | Powered by Sui Blockchain
+        </p>
+        <p style={{ margin: '10px 0 0 0', fontSize: '12px' }}>
+          Save Money · Win Big · Zero Risk | Current APY: {apyLoading ? '...' : naviAPY.toFixed(2)}%
+        </p>
       </div>
     </div>
   )

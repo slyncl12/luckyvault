@@ -1,28 +1,41 @@
-# Dependencies
-node_modules/
-frontend/node_modules/
-
-# Build outputs
-frontend/dist/
-frontend/.vercel/
-
-# Environment files
+# ⚠️ CRITICAL: Never commit secrets!
 .env
 .env.local
+.env*.local
+keeper/.env
+frontend/.env.local
+**/suiprivkey*
+**/*.env
 
-# IDE
-.vscode/
-.idea/
+# Dependencies
+node_modules/
+package-lock.json
+yarn.lock
 
-# OS
-.DS_Store
-Thumbs.db
-
-# Sui
-.sui/
+# Build artifacts
+.next/
+out/
+build/
+dist/
+move/lottery_personal/build/
+move/lottery_personal_backup*/
 
 # Logs
 *.log
 npm-debug.log*
-frontend/.env
-keeper/.env
+yarn-debug.log*
+
+# PM2
+.pm2/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+
+# Backups
+backups/
+*.tar.gz

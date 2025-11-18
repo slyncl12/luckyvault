@@ -1,0 +1,31 @@
+  const fetchJackpotBalances = async () => {
+    try {
+      // Skip if JACKPOT_TIERS_ID is not set
+      if (!JACKPOT_TIERS_ID) {
+        console.log('⚠️ JACKPOT_TIERS_ID not configured, skipping jackpot fetch')
+        return
+      }
+      
+      const jackpotObject = await client.getObject({
+        id: JACKPOT_TIERS_ID,
+        options: { showContent: true }
+      })
+      if (jackpotObject.data?.content?.dataType === 'moveObject') {
+        const fields = jackpotObject.data.content.fields
+        setJackpotBalances({
+          hourly: parseInt(fields.hourly_pool || '0'),
+          daily: parseInt(fields.daily_pool || '0'),
+          weekly: parseInt(fields.weekly_pool || '0'),
+          monthly: parseInt(fields.monthly_pool || '0')
+        })
+        setNextDrawTimes({
+          hourly: parseInt(fields.last_hourly_draw || '0') + 3600000,
+          daily: parseInt(fields.last_daily_draw || '0') + 86400000,
+          weekly: parseInt(fields.last_weekly_draw || '0') + 604800000,
+          monthly: parseInt(fields.last_monthly_draw || '0') + 2592000000
+        })
+      }
+    } catch (error) {
+      console.error('Error fetching jackpots:', error)
+    }
+  }

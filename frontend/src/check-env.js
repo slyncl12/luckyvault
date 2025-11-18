@@ -1,0 +1,5 @@
+console.log('VITE_PACKAGE_ID:', import.meta.env.VITE_PACKAGE_ID)
+console.log('VITE_POOL_OBJECT_ID:', import.meta.env.VITE_POOL_OBJECT_ID)
+console.log('VITE_DRAW_CONFIG_ID:', import.meta.env.VITE_DRAW_CONFIG_ID)
+console.log('VITE_JACKPOT_TIERS_ID:', import.meta.env.VITE_JACKPOT_TIERS_ID)
+console.log('VITE_SUILEND_TRACKER_ID:', import.meta.env.VITE_SUILEND_TRACKER_ID)

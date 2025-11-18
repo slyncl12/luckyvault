@@ -1,0 +1,1093 @@
+// LuckyVault - With Luck System
+// No-loss lottery with dual luck tracking
+
+module luckyvault::lottery_personal {
+    use sui::coin::{Self, Coin};
+    use sui::balance::{Self, Balance};
+    use sui::table::{Self, Table};
+    use sui::vec_set::{Self, VecSet};
+    use sui::event;
+    use sui::clock::{Self, Clock};
+    use sui::random::{Self, Random, RandomGenerator, new_generator}; 
+    use sui::vec_map;
+ 
+    // ============ Type Definition ============
+    //public struct USDC has drop {}
+
+    // ============ Constants ============
+    const MAX_DEPOSIT_PER_USER: u64 = 100_000_000;
+    const USDC_DECIMALS: u8 = 6;
+    const EDrawNotReady: u64 = 4;
+    const ENoParticipants: u64 = 5;
+    const HOUR_IN_MS: u64 = 3600000; // 1 hour
+    const DAY_IN_MS: u64 = 86400000; // 1 day  
+    const WEEK_IN_MS: u64 = 604800000; // 7 days
+    const MONTH_IN_MS: u64 = 2592000000; // 30 days
+
+const SUILEND_THRESHOLD: u64 = 10000; // 0.01 USDC (6 decimals)
+
+// Jackpot yield allocation (basis points)
+const HOURLY_JACKPOT_BPS: u64 = 100;   // 1%
+const DAILY_JACKPOT_BPS: u64 = 500;    // 5%
+const WEEKLY_JACKPOT_BPS: u64 = 1500;  // 15%
+const MONTHLY_JACKPOT_BPS: u64 = 3000; // 30%
+    // ============ Errors ============
+    const ENotWhitelisted: u64 = 0;
+    const ENotAdmin: u64 = 1;
+    const EPoolPaused: u64 = 2;
+    const EExceedsUserLimit: u64 = 3;
+    const ENotDepositor: u64 = 4;
+    const EInsufficientBalance: u64 = 5;
+    const ENoTicket: u64 = 6;
+    const EInvalidLuck: u64 = 7;
+    const EInvalidDrawType: u64 = 8;
+    const EInsufficientMegaFunds: u64 = 9;
+    const ETicketUsed: u64 = 10;
+    const EInvalidAmount: u64 = 11;
+
+    // ============ Structs ============
+
+    public struct AdminCap has key, store {
+        id: UID,
+    }
+
+    public struct LotteryPool<phantom T> has key {
+        id: UID,
+        balance: Balance<T>,
+        total_deposited: u64,
+        user_deposits: Table<address, u64>,
+        whitelist: VecSet<address>,
+        paused: bool,
+        depositors: vector<address>,        
+        created_at: u64,
+    }
+
+    public struct PlayerLuck has key, store {
+        id: UID,
+        player: address,
+        regular_luck_bps: u64,
+        regular_consecutive_losses: u64,
+        last_regular_draw: u64,
+        mega_luck_bps: u64,
+        mega_consecutive_losses: u64,
+        last_mega_draw: u64,
+        created_at: u64,
+    }
+
+    public struct Ticket has key, store {
+        id: UID,
+        owner: address,
+        amount: u64,
+        deposit_time: u64,
+        pool_id: address,
+        purchase_draw_number: u64,
+        purchase_luck_bps: u64,
+        is_active: bool,
+    }
+
+    public struct MegaEntry has key, store {
+        id: UID,
+        owner: address,
+        entry_type: u8,
+        amount_paid: u64,
+        purchase_draw_number: u64,
+        purchase_mega_luck_bps: u64,
+        is_used: bool,
+        created_at: u64,
+    }
+
+    public struct DrawConfig has key {
+        id: UID,
+        current_draw_number: u64,
+        last_daily_draw: u64,
+        last_weekly_draw: u64,
+        last_monthly_draw: u64,
+        luck_increment_bps: u64,
+        max_regular_luck_bps: u64,
+        max_mega_luck_bps: u64,
+    }
+
+public struct MegaJackpotPool<phantom T> has key {
+    id: UID,
+    weekly_pool: Balance<T>,
+    monthly_pool: Balance<T>,
+    weekly_rollover: u64,
+    monthly_rollover: u64,
+}
+    // ============ Events ============
+
+    public struct DepositEvent has copy, drop {
+        user: address,
+        amount: u64,
+        ticket_id: address,
+        luck_multiplier: u64,
+        total_pool: u64,
+        timestamp: u64,
+    }
+
+    public struct WithdrawEvent has copy, drop {
+        user: address,
+        amount: u64,
+        ticket_id: address,
+        total_pool: u64,
+        timestamp: u64,
+    }
+
+    public struct MegaEntryPurchased has copy, drop {
+        player: address,
+        entry_type: u8,
+        amount: u64,
+        mega_luck: u64,
+        timestamp: u64,
+    }
+// ============ NEW: Multi-Tier Jackpot System ============
+
+public struct JackpotTiers<phantom T> has key {
+    id: UID,
+    hourly_pool: Balance<T>,
+    daily_pool: Balance<T>,
+    weekly_pool: Balance<T>,
+    monthly_pool: Balance<T>,
+    last_hourly_draw: u64,
+    last_daily_draw: u64,
+    last_weekly_draw: u64,
+    last_monthly_draw: u64,
+    hourly_winner: Option<address>,
+    daily_winner: Option<address>,
+    weekly_winner: Option<address>,
+    monthly_winner: Option<address>,
+}
+
+public struct SuilendTracker has key {
+    id: UID,
+    deposited_to_suilend: u64,
+    last_yield_check: u64,
+    total_yield_earned: u64,
+    auto_deposit_threshold: u64, // 0.01 USDC = 10000
+}
+
+// ============ NEW EVENTS ============
+
+public struct JackpotDrawEvent has copy, drop {
+    tier: vector<u8>, // "hourly", "daily", "weekly", "monthly"
+    winner: address,
+    amount: u64,
+    timestamp: u64,
+}
+
+public struct AutoSuilendEvent has copy, drop {
+    action: vector<u8>, // "deposit" or "withdraw"
+    amount: u64,
+    timestamp: u64,
+}
+    public struct DrawExecuted has copy, drop {
+        draw_number: u64,
+        draw_type: u8,
+        winner: address,
+        prize_amount: u64,
+        timestamp: u64,
+    }
+
+    public struct LuckUpdated has copy, drop {
+        player: address,
+        old_luck: u64,
+        new_luck: u64,
+        is_mega: bool,
+        timestamp: u64,
+    }
+
+    public struct WhitelistEvent has copy, drop {
+        address: address,
+        added: bool,
+        timestamp: u64,
+    }
+
+    public struct PauseEvent has copy, drop {
+        paused: bool,
+        timestamp: u64,
+    }
+
+public struct DrawEvent has copy, drop {
+    draw_number: u64,
+    draw_type: u8,
+    winner: address,
+    prize: u64
+}
+    // ============ Init ============
+
+    fun init(ctx: &mut TxContext) {
+        let admin_cap = AdminCap {
+            id: object::new(ctx),
+        };
+        transfer::transfer(admin_cap, tx_context::sender(ctx));
+    }
+
+    // ============ Admin Setup ============
+
+    public entry fun create_pool<T>(
+        _admin: &AdminCap,
+        wallet1: address,
+        wallet2: address,
+        clock: &Clock,
+        ctx: &mut TxContext
+    ) {
+        let mut whitelist = vec_set::empty<address>();
+        vec_set::insert(&mut whitelist, wallet1);
+        vec_set::insert(&mut whitelist, wallet2);
+
+        let pool = LotteryPool {
+            id: object::new(ctx),
+            balance: balance::zero<T>(),
+            total_deposited: 0,
+            user_deposits: table::new(ctx),
+            whitelist,
+            paused: false,
+	    depositors: vector::empty(),           
+            created_at: clock::timestamp_ms(clock),
+        };
+
+        transfer::share_object(pool);
+    }
+
+    public entry fun initialize_luck_system(
+        _admin: &AdminCap,
+        ctx: &mut TxContext
+    ) {
+        let config = DrawConfig {
+            id: object::new(ctx),
+            current_draw_number: 0,
+            last_daily_draw: 0,
+            last_weekly_draw: 0,
+            last_monthly_draw: 0,
+            luck_increment_bps: 1000,
+            max_regular_luck_bps: 50000,
+            max_mega_luck_bps: 100000,
+        };
+        transfer::share_object(config);
+    }
+
+    public entry fun initialize_mega_pool<T>(
+        _admin: &AdminCap,
+        ctx: &mut TxContext
+    ) {
+        let mega_pool = MegaJackpotPool<T> {
+            id: object::new(ctx),
+            weekly_pool: balance::zero<T>(),
+            monthly_pool: balance::zero<T>(),
+            weekly_rollover: 0,
+            monthly_rollover: 0,
+        };
+        transfer::share_object(mega_pool);
+    }
+// ============ NEW INITIALIZATION FUNCTIONS ============
+
+/// Initialize the 4-tier jackpot system
+public entry fun initialize_jackpot_tiers<T>(
+    _admin: &AdminCap,
+    clock: &Clock,
+    ctx: &mut TxContext
+) {
+    let current_time = clock::timestamp_ms(clock);
+    let tiers = JackpotTiers<T> {
+        id: object::new(ctx),
+        hourly_pool: balance::zero(),
+        daily_pool: balance::zero(),
+        weekly_pool: balance::zero(),
+        monthly_pool: balance::zero(),
+        last_hourly_draw: current_time,
+        last_daily_draw: current_time,
+        last_weekly_draw: current_time,
+        last_monthly_draw: current_time,
+        hourly_winner: option::none(),
+        daily_winner: option::none(),
+        weekly_winner: option::none(),
+        monthly_winner: option::none(),
+    };
+    transfer::share_object(tiers);
+}
+
+/// Initialize Suilend tracking
+public entry fun initialize_suilend_tracker(
+    _admin: &AdminCap,
+    clock: &Clock,
+    ctx: &mut TxContext
+) {
+    let tracker = SuilendTracker {
+        id: object::new(ctx),
+        deposited_to_suilend: 0,
+        last_yield_check: clock::timestamp_ms(clock),
+        total_yield_earned: 0,
+        auto_deposit_threshold: SUILEND_THRESHOLD,
+    };
+    transfer::share_object(tracker);
+}
+    // ============ Player Luck ============
+
+    public entry fun create_my_luck(
+        clock: &Clock,
+        ctx: &mut TxContext
+    ) {
+        let sender = tx_context::sender(ctx);
+        let luck = PlayerLuck {
+            id: object::new(ctx),
+            player: sender,
+            regular_luck_bps: 10000,
+            regular_consecutive_losses: 0,
+            last_regular_draw: 0,
+            mega_luck_bps: 10000,
+            mega_consecutive_losses: 0,
+            last_mega_draw: 0,
+            created_at: clock::timestamp_ms(clock),
+        };
+        transfer::transfer(luck, sender);
+    }
+
+    // ============ Deposit/Withdraw ============
+
+    public entry fun deposit<T>(
+    pool: &mut LotteryPool<T>,
+    config: &DrawConfig,
+    payment: Coin<T>,
+    player_luck: &PlayerLuck,
+    clock: &Clock,
+    ctx: &mut TxContext
+) {
+        let sender = tx_context::sender(ctx);
+        assert!(!pool.paused, EPoolPaused);
+        assert!(vec_set::contains(&pool.whitelist, &sender), ENotWhitelisted);
+        assert!(player_luck.player == sender, ENotDepositor);
+
+        let amount = coin::value(&payment);
+        assert!(amount >= 0, EInvalidAmount);
+
+        let current = if (table::contains(&pool.user_deposits, sender)) {
+            *table::borrow(&pool.user_deposits, sender)
+        } else {
+            0
+        };
+        let new_total = current + amount;
+        assert!(new_total <= MAX_DEPOSIT_PER_USER, EExceedsUserLimit);
+
+        balance::join(&mut pool.balance, coin::into_balance(payment));
+        pool.total_deposited = pool.total_deposited + amount;
+
+        if (table::contains(&pool.user_deposits, sender)) {
+            let user_deposit = table::borrow_mut(&mut pool.user_deposits, sender);
+            *user_deposit = new_total;
+        } else {
+            table::add(&mut pool.user_deposits, sender, amount);
+        if (!vector::contains(&pool.depositors, &sender)) {
+    vector::push_back(&mut pool.depositors, sender);
+};
+        };
+
+        let ticket_id = object::new(ctx);
+        let ticket_addr = object::uid_to_address(&ticket_id);
+
+        let ticket = Ticket {
+            id: ticket_id,
+            owner: sender,
+            amount,
+            deposit_time: clock::timestamp_ms(clock),
+            pool_id: object::uid_to_address(&pool.id),
+            purchase_draw_number: config.current_draw_number,
+            purchase_luck_bps: player_luck.regular_luck_bps,
+            is_active: true,
+        };
+
+        event::emit(DepositEvent {
+            user: sender,
+            amount,
+            ticket_id: ticket_addr,
+            luck_multiplier: player_luck.regular_luck_bps,
+            total_pool: pool.total_deposited,
+            timestamp: clock::timestamp_ms(clock),
+        });
+
+        transfer::transfer(ticket, sender);
+    }
+
+    public entry fun withdraw<T>(
+        pool: &mut LotteryPool<T>,
+        ticket: Ticket,
+        clock: &Clock,
+        ctx: &mut TxContext
+    ) {
+        let Ticket { 
+            id, 
+            owner, 
+            amount, 
+            deposit_time: _, 
+            pool_id,
+            purchase_draw_number: _,
+            purchase_luck_bps: _,
+            is_active: _,
+        } = ticket;
+
+        let sender = tx_context::sender(ctx);
+        assert!(owner == sender, ENotDepositor);
+        assert!(pool_id == object::uid_to_address(&pool.id), ENoTicket);
+        assert!(balance::value(&pool.balance) >= amount, EInsufficientBalance);
+
+        let withdrawn = balance::split(&mut pool.balance, amount);
+        pool.total_deposited = pool.total_deposited - amount;
+
+        if (table::contains(&pool.user_deposits, owner)) {
+            let user_deposit = table::borrow_mut(&mut pool.user_deposits, owner);
+            *user_deposit = *user_deposit - amount;
+            if (*user_deposit == 0) {
+                table::remove(&mut pool.user_deposits, owner);
+            };
+        };
+
+        let ticket_id = object::uid_to_address(&id);
+
+        event::emit(WithdrawEvent {
+            user: owner,
+            amount,
+            ticket_id,
+            total_pool: pool.total_deposited,
+            timestamp: clock::timestamp_ms(clock),
+        });
+
+        object::delete(id);
+        transfer::public_transfer(coin::from_balance(withdrawn, ctx), sender);
+    }
+
+// ============ NEW: Multi-Tier Draw Functions ============
+
+/// Execute hourly draw
+public entry fun execute_hourly_draw<T>(
+    pool: &LotteryPool<T>,
+    jackpot_tiers: &mut JackpotTiers<T>,
+    clock: &Clock,
+    random: &Random,
+    ctx: &mut TxContext
+) {
+    let current_time = clock::timestamp_ms(clock);
+    assert!(current_time >= jackpot_tiers.last_hourly_draw + HOUR_IN_MS, EDrawNotReady);
+    
+    let depositors = &pool.depositors;
+    assert!(vector::length(depositors) > 0, ENoParticipants);
+    
+    // Simple random selection (weighted by deposit in production)
+    let mut generator = random::new_generator(random, ctx);
+    let winner_index = random::generate_u64_in_range(&mut generator, 0, vector::length(depositors) - 1);
+    let winner = *vector::borrow(depositors, winner_index);
+    
+    let prize = balance::value(&jackpot_tiers.hourly_pool);
+    if (prize > 0) {
+        let prize_balance = balance::withdraw_all(&mut jackpot_tiers.hourly_pool);
+        transfer::public_transfer(coin::from_balance(prize_balance, ctx), winner);
+        
+        jackpot_tiers.hourly_winner = option::some(winner);
+        jackpot_tiers.last_hourly_draw = current_time;
+        
+        event::emit(JackpotDrawEvent {
+            tier: b"hourly",
+            winner,
+            amount: prize,
+            timestamp: current_time,
+        });
+    }
+}
+
+/// Execute daily draw
+public entry fun execute_daily_draw<T>(
+    pool: &LotteryPool<T>,
+    jackpot_tiers: &mut JackpotTiers<T>,
+    clock: &Clock,
+    random: &Random,
+    ctx: &mut TxContext
+) {
+    let current_time = clock::timestamp_ms(clock);
+    assert!(current_time >= jackpot_tiers.last_daily_draw + DAY_IN_MS, EDrawNotReady);
+    
+    let depositors = &pool.depositors;
+    assert!(vector::length(depositors) > 0, ENoParticipants);
+    
+    let mut generator = random::new_generator(random, ctx);
+    let winner_index = random::generate_u64_in_range(&mut generator, 0, vector::length(depositors) - 1);
+    let winner = *vector::borrow(depositors, winner_index);
+    
+    let prize = balance::value(&jackpot_tiers.daily_pool);
+    if (prize > 0) {
+        let prize_balance = balance::withdraw_all(&mut jackpot_tiers.daily_pool);
+        transfer::public_transfer(coin::from_balance(prize_balance, ctx), winner);
+        
+        jackpot_tiers.daily_winner = option::some(winner);
+        jackpot_tiers.last_daily_draw = current_time;
+        
+        event::emit(JackpotDrawEvent {
+            tier: b"daily",
+            winner,
+            amount: prize,
+            timestamp: current_time,
+        });
+    }
+}
+
+/// Execute weekly draw
+public entry fun execute_weekly_draw<T>(
+    pool: &LotteryPool<T>,
+    jackpot_tiers: &mut JackpotTiers<T>,
+    clock: &Clock,
+    random: &Random,
+    ctx: &mut TxContext
+) {
+    let current_time = clock::timestamp_ms(clock);
+    assert!(current_time >= jackpot_tiers.last_weekly_draw + WEEK_IN_MS, EDrawNotReady);
+    
+    let depositors = &pool.depositors;
+    assert!(vector::length(depositors) > 0, ENoParticipants);
+    
+    let mut generator = random::new_generator(random, ctx);
+    let winner_index = random::generate_u64_in_range(&mut generator, 0, vector::length(depositors) - 1);
+    let winner = *vector::borrow(depositors, winner_index);
+    
+    let prize = balance::value(&jackpot_tiers.weekly_pool);
+    if (prize > 0) {
+        let prize_balance = balance::withdraw_all(&mut jackpot_tiers.weekly_pool);
+        transfer::public_transfer(coin::from_balance(prize_balance, ctx), winner);
+        
+        jackpot_tiers.weekly_winner = option::some(winner);
+        jackpot_tiers.last_weekly_draw = current_time;
+        
+        event::emit(JackpotDrawEvent {
+            tier: b"weekly",
+            winner,
+            amount: prize,
+            timestamp: current_time,
+        });
+    }
+}
+
+/// Execute monthly draw
+public entry fun execute_monthly_draw<T>(
+    pool: &LotteryPool<T>,
+    jackpot_tiers: &mut JackpotTiers<T>,
+    clock: &Clock,
+    random: &Random,
+    ctx: &mut TxContext
+) {
+    let current_time = clock::timestamp_ms(clock);
+    assert!(current_time >= jackpot_tiers.last_monthly_draw + MONTH_IN_MS, EDrawNotReady);
+    
+    let depositors = &pool.depositors;
+    assert!(vector::length(depositors) > 0, ENoParticipants);
+    
+    let mut generator = random::new_generator(random, ctx);
+    let winner_index = random::generate_u64_in_range(&mut generator, 0, vector::length(depositors) - 1);
+}
+// ============ NEW: Smart Deposit with Auto-Luck Creation ============
+
+/// Deposit with automatic PlayerLuck creation if needed
+public entry fun deposit_smart<T>(
+    pool: &mut LotteryPool<T>,
+    config: &DrawConfig,
+    mut payment: Coin<T>,
+    clock: &Clock,
+    ctx: &mut TxContext
+) 
+{
+    let sender = tx_context::sender(ctx);
+    assert!(!pool.paused, EPoolPaused);
+    assert!(vec_set::contains(&pool.whitelist, &sender), ENotWhitelisted);
+    
+    let amount = coin::value(&payment);
+    assert!(amount > 0, EInvalidAmount);
+    
+    // Check deposit limit
+    let current = if (table::contains(&pool.user_deposits, sender)) {
+        *table::borrow(&pool.user_deposits, sender)
+    } else {
+        0
+    };
+    let new_total = current + amount;
+    assert!(new_total <= MAX_DEPOSIT_PER_USER, EExceedsUserLimit);
+    
+    // Add to pool
+    balance::join(&mut pool.balance, coin::into_balance(payment));
+    pool.total_deposited = pool.total_deposited + amount;
+    
+    // Update user deposits
+    if (table::contains(&pool.user_deposits, sender)) {
+        let user_deposit = table::borrow_mut(&mut pool.user_deposits, sender);
+        *user_deposit = new_total;
+    } else {
+        table::add(&mut pool.user_deposits, sender, amount);
+        if (!vector::contains(&pool.depositors, &sender)) {
+            vector::push_back(&mut pool.depositors, sender);
+        };
+    };
+    
+    // Create ticket with default luck (1x)
+    let ticket_id = object::new(ctx);
+    let ticket_addr = object::uid_to_address(&ticket_id);
+    let ticket = Ticket {
+        id: ticket_id,
+        owner: sender,
+        amount,
+        deposit_time: clock::timestamp_ms(clock),
+        pool_id: object::uid_to_address(&pool.id),
+        purchase_draw_number: config.current_draw_number,
+        purchase_luck_bps: 10000, // Default 1x luck (10000 bps = 100%)
+        is_active: true,
+    };
+    
+    event::emit(DepositEvent {
+        user: sender,
+        amount,
+        ticket_id: ticket_addr,
+        luck_multiplier: 10000,
+        total_pool: pool.total_deposited,
+        timestamp: clock::timestamp_ms(clock),
+    });
+    
+    transfer::transfer(ticket, sender);
+}
+
+// ============ NEW: Smart Withdraw (Pool + Suilend) ============
+
+/// Withdraw that checks pool first, then Suilend if needed
+public entry fun withdraw_smart<T>(
+    pool: &mut LotteryPool<T>,
+    tracker: &mut SuilendTracker,
+    ticket: Ticket,
+    clock: &Clock,
+    ctx: &mut TxContext
+) {
+    let Ticket {
+        id,
+        owner,
+        amount,
+        deposit_time: _,
+        pool_id,
+        purchase_draw_number: _,
+        purchase_luck_bps: _,
+        is_active: _,
+    } = ticket;
+
+    let sender = tx_context::sender(ctx);
+    assert!(owner == sender, ENotDepositor);
+    assert!(pool_id == object::uid_to_address(&pool.id), ENoTicket);
+
+    let pool_balance = balance::value(&pool.balance);
+    
+    // Check if we have enough in pool
+    if (pool_balance >= amount) {
+        // Withdraw from pool directly
+        let withdrawn = balance::split(&mut pool.balance, amount);
+        pool.total_deposited = pool.total_deposited - amount;
+
+        if (table::contains(&pool.user_deposits, owner)) {
+            let user_deposit = table::borrow_mut(&mut pool.user_deposits, owner);
+            *user_deposit = *user_deposit - amount;
+            if (*user_deposit == 0) {
+                table::remove(&mut pool.user_deposits, owner);
+            };
+        };
+
+        let ticket_id = object::uid_to_address(&id);
+
+        event::emit(WithdrawEvent {
+            user: owner,
+            amount,
+            ticket_id,
+            total_pool: pool.total_deposited,
+            timestamp: clock::timestamp_ms(clock),
+        });
+
+        object::delete(id);
+        transfer::public_transfer(coin::from_balance(withdrawn, ctx), sender);
+    } else {
+        // Need to get funds from Suilend
+        // For now, assert that admin must bring funds back first
+        // In production, this would trigger automatic Suilend withdrawal
+object::delete(id);        
+assert!(pool_balance >= amount, EInsufficientBalance);
+    }
+}    // ============ Mega Entry ============
+
+    public entry fun buy_mega_entry<T>(
+        mega_pool: &mut MegaJackpotPool<T>,
+        config: &DrawConfig,
+        payment: Coin<T>,
+        player_luck: &PlayerLuck,
+        entry_type: u8,
+        clock: &Clock,
+        ctx: &mut TxContext
+    ) {
+        let sender = tx_context::sender(ctx);
+        assert!(entry_type == 1 || entry_type == 2, EInvalidDrawType);
+        assert!(player_luck.player == sender, ENotDepositor);
+
+        let amount = coin::value(&payment);
+        let required = if (entry_type == 1) { 500_000 } else { 1_000_000 };
+        assert!(amount >= required, EInsufficientMegaFunds);
+
+        let mut payment_balance = coin::into_balance(payment);
+        let total = balance::value(&payment_balance);
+        let prize_amount = (total * 80) / 100;
+        
+        let prize_balance = balance::split(&mut payment_balance, prize_amount);
+
+        if (entry_type == 1) {
+            balance::join(&mut mega_pool.weekly_pool, prize_balance);
+        } else {
+            balance::join(&mut mega_pool.monthly_pool, prize_balance);
+        };
+
+        // Platform fee returns to sender (or treasury in production)
+        let platform_coin = coin::from_balance(payment_balance, ctx);
+        transfer::public_transfer(platform_coin, sender);
+
+        let entry = MegaEntry {
+            id: object::new(ctx),
+            owner: sender,
+            entry_type,
+            amount_paid: amount,
+            purchase_draw_number: config.current_draw_number,
+            purchase_mega_luck_bps: player_luck.mega_luck_bps,
+            is_used: false,
+            created_at: clock::timestamp_ms(clock),
+        };
+
+        event::emit(MegaEntryPurchased {
+            player: sender,
+            entry_type,
+            amount,
+            mega_luck: player_luck.mega_luck_bps,
+            timestamp: clock::timestamp_ms(clock),
+        });
+
+        transfer::transfer(entry, sender);
+    }
+// ============ NEW: Auto-Suilend Functions ============
+
+/// Check if pool should auto-deposit to Suilend
+public entry fun check_and_deposit_to_suilend<T>(
+    _admin: &AdminCap,
+    pool: &mut LotteryPool<T>,
+    tracker: &mut SuilendTracker,
+    clock: &Clock,
+    ctx: &mut TxContext
+) {
+    let pool_balance = balance::value(&pool.balance);
+    
+    // Only deposit if above threshold
+    if (pool_balance > tracker.auto_deposit_threshold) {
+        let to_deposit = pool_balance - tracker.auto_deposit_threshold;
+        let withdrawn = coin::take(&mut pool.balance, to_deposit, ctx);
+        
+        tracker.deposited_to_suilend = tracker.deposited_to_suilend + to_deposit;
+        
+        event::emit(AutoSuilendEvent {
+            action: b"deposit",
+            amount: to_deposit,
+            timestamp: clock::timestamp_ms(clock),
+        });
+        
+        // Transfer to admin to deposit to Suilend manually
+        // In production, this would call Suilend protocol directly
+        transfer::public_transfer(withdrawn, tx_context::sender(ctx));
+    }
+}
+
+/// Record yield earned from Suilend
+public entry fun record_suilend_yield<T>(
+    _admin: &AdminCap,
+    tracker: &mut SuilendTracker,
+    jackpot_tiers: &mut JackpotTiers<T>,
+    yield_coins: Coin<T>,
+    clock: &Clock,
+) {
+    let mut yield_amount = coin::value(&yield_coins);
+    tracker.total_yield_earned = tracker.total_yield_earned + yield_amount;
+    tracker.last_yield_check = clock::timestamp_ms(clock);
+    
+    let mut yield_balance = coin::into_balance(yield_coins);
+    
+    // Split yield into jackpot tiers
+    let hourly_amount = (yield_amount * HOURLY_JACKPOT_BPS) / 10000;
+    let daily_amount = (yield_amount * DAILY_JACKPOT_BPS) / 10000;
+    let weekly_amount = (yield_amount * WEEKLY_JACKPOT_BPS) / 10000;
+    let monthly_amount = (yield_amount * MONTHLY_JACKPOT_BPS) / 10000;
+    
+    balance::join(&mut jackpot_tiers.hourly_pool, balance::split(&mut yield_balance, hourly_amount));
+    balance::join(&mut jackpot_tiers.daily_pool, balance::split(&mut yield_balance, daily_amount));
+    balance::join(&mut jackpot_tiers.weekly_pool, balance::split(&mut yield_balance, weekly_amount));
+    balance::join(&mut jackpot_tiers.monthly_pool, balance::split(&mut yield_balance, monthly_amount));
+    
+    // Any remainder stays in the balance (destroy it or add to monthly)
+    balance::join(&mut jackpot_tiers.monthly_pool, yield_balance);
+}
+// ============ NEW: Enhanced View Functions ============
+
+/// Get complete pool statistics
+public fun get_pool_stats<T>(pool: &LotteryPool<T>): (u64, u64, u64, bool) {
+    (
+        balance::value(&pool.balance),
+        pool.total_deposited,
+        vector::length(&pool.depositors),
+        pool.paused
+    )
+}
+
+/// Get Suilend tracker stats
+public fun get_suilend_stats(tracker: &SuilendTracker): (u64, u64, u64) {
+    (
+        tracker.deposited_to_suilend,
+        tracker.total_yield_earned,
+        tracker.auto_deposit_threshold
+    )
+}
+
+/// Get all jackpot tier balances
+public fun get_jackpot_balances<T>(tiers: &JackpotTiers<T>): (u64, u64, u64, u64) {
+    (
+        balance::value(&tiers.hourly_pool),
+        balance::value(&tiers.daily_pool),
+        balance::value(&tiers.weekly_pool),
+        balance::value(&tiers.monthly_pool)
+    )
+}
+
+/// Get next draw times
+public fun get_next_draw_times<T>(tiers: &JackpotTiers<T>): (u64, u64, u64, u64) {
+    (
+        tiers.last_hourly_draw + HOUR_IN_MS,
+        tiers.last_daily_draw + DAY_IN_MS,
+        tiers.last_weekly_draw + WEEK_IN_MS,
+        tiers.last_monthly_draw + MONTH_IN_MS
+    )
+}
+
+/// Get last winners
+public fun get_last_winners<T>(tiers: &JackpotTiers<T>): (Option<address>, Option<address>, Option<address>, Option<address>) {
+    (
+        tiers.hourly_winner,
+        tiers.daily_winner,
+        tiers.weekly_winner,
+        tiers.monthly_winner
+    )
+}
+
+/// Check if draws are ready
+public fun check_draws_ready<T>(tiers: &JackpotTiers<T>, clock: &Clock): (bool, bool, bool, bool) {
+    let current_time = clock::timestamp_ms(clock);
+    (
+        current_time >= tiers.last_hourly_draw + HOUR_IN_MS,
+        current_time >= tiers.last_daily_draw + DAY_IN_MS,
+        current_time >= tiers.last_weekly_draw + WEEK_IN_MS,
+        current_time >= tiers.last_monthly_draw + MONTH_IN_MS
+    )
+}
+
+/// Get user's total entries (based on deposits and luck)
+public fun get_user_entries<T>(pool: &LotteryPool<T>, user: address): u64 {
+    if (table::contains(&pool.user_deposits, user)) {
+        *table::borrow(&pool.user_deposits, user)
+    } else {
+        0
+    }
+}
+
+// Helper function to select random depositor weighted by their deposit + luck
+
+fun select_random_depositor<T>(
+    pool: &LotteryPool<T>,
+    generator: &mut RandomGenerator
+): address {
+    let num_depositors = vector::length(&pool.depositors);
+    
+    if (num_depositors == 0) {
+        abort EInvalidAmount
+    };
+    
+    // Generate random index
+    let random_index = sui::random::generate_u64_in_range(generator, 0, num_depositors - 1);
+    
+    // Return the randomly selected depositor
+    *vector::borrow(&pool.depositors, random_index)
+}
+
+    // ============ Luck Calculations ============
+
+    public fun calculate_weighted_entries(
+        ticket_luck_bps: u64,
+        current_luck_bps: u64,
+        ticket_draw: u64,
+        current_draw: u64,
+    ): u64 {
+        if (ticket_draw == current_draw) {
+            current_luck_bps
+        } else {
+            let growth = if (current_luck_bps > ticket_luck_bps) {
+                current_luck_bps - ticket_luck_bps
+            } else {
+                0
+            };
+            ticket_luck_bps + (growth / 2)
+        }
+    }
+
+    public fun update_luck_after_draw(
+        player_luck: &mut PlayerLuck,
+        won: bool,
+        is_mega: bool,
+        config: &DrawConfig,
+        clock: &Clock,
+    ) {
+        let old_luck = if (is_mega) {
+            player_luck.mega_luck_bps
+        } else {
+            player_luck.regular_luck_bps
+        };
+
+        if (is_mega) {
+            if (won) {
+                player_luck.mega_luck_bps = 10000;
+                player_luck.mega_consecutive_losses = 0;
+            } else {
+                player_luck.mega_consecutive_losses = player_luck.mega_consecutive_losses + 1;
+                let new_luck = player_luck.mega_luck_bps + config.luck_increment_bps;
+                player_luck.mega_luck_bps = if (new_luck > config.max_mega_luck_bps) {
+                    config.max_mega_luck_bps
+                } else {
+                    new_luck
+                };
+            };
+            player_luck.last_mega_draw = config.current_draw_number;
+        } else {
+            if (won) {
+                player_luck.regular_luck_bps = 10000;
+                player_luck.regular_consecutive_losses = 0;
+            } else {
+                player_luck.regular_consecutive_losses = player_luck.regular_consecutive_losses + 1;
+                let new_luck = player_luck.regular_luck_bps + config.luck_increment_bps;
+                player_luck.regular_luck_bps = if (new_luck > config.max_regular_luck_bps) {
+                    config.max_regular_luck_bps
+                } else {
+                    new_luck
+                };
+            };
+            player_luck.last_regular_draw = config.current_draw_number;
+        };
+
+        event::emit(LuckUpdated {
+            player: player_luck.player,
+            old_luck,
+            new_luck: if (is_mega) { player_luck.mega_luck_bps } else { player_luck.regular_luck_bps },
+            is_mega,
+            timestamp: clock::timestamp_ms(clock),
+        });
+    }
+
+    // ============ Admin Functions ============
+
+    public fun add_to_whitelist<T>(
+        _admin: &AdminCap,
+        pool: &mut LotteryPool<T>,
+        new_address: address,
+        clock: &Clock,
+    ) {
+        vec_set::insert(&mut pool.whitelist, new_address);
+        event::emit(WhitelistEvent {
+            address: new_address,
+            added: true,
+            timestamp: clock::timestamp_ms(clock),
+        });
+    }
+
+    public entry fun pause<T>(
+        _admin: &AdminCap,
+        pool: &mut LotteryPool<T>,
+        clock: &Clock,
+    ) {
+        pool.paused = true;
+        event::emit(PauseEvent {
+            paused: true,
+            timestamp: clock::timestamp_ms(clock),
+        });
+    }
+
+    public entry fun unpause<T>(
+        _admin: &AdminCap,
+        pool: &mut LotteryPool<T>,
+        clock: &Clock,
+    ) {
+        pool.paused = false;
+        event::emit(PauseEvent {
+            paused: false,
+            timestamp: clock::timestamp_ms(clock),
+        });
+    }
+
+    public entry fun admin_withdraw_for_suilend<T>(
+        _admin: &AdminCap,
+        pool: &mut LotteryPool<T>,
+        amount: u64,
+        clock: &Clock,
+        ctx: &mut TxContext
+    ) {
+        assert!(balance::value(&pool.balance) >= amount, EInsufficientBalance);
+        let withdrawn = coin::take(&mut pool.balance, amount, ctx);
+
+        event::emit(WithdrawEvent {
+            user: tx_context::sender(ctx),
+            amount,
+            ticket_id: @0x0,
+            total_pool: balance::value(&pool.balance),
+            timestamp: clock::timestamp_ms(clock),
+        });
+
+        transfer::public_transfer(withdrawn, tx_context::sender(ctx));
+    }
+
+    public entry fun admin_deposit_from_suilend<T>(
+        _admin: &AdminCap,
+        pool: &mut LotteryPool<T>,
+        coins: Coin<T>,
+        clock: &Clock,
+    ) {
+        let amount = coin::value(&coins);
+        balance::join(&mut pool.balance, coin::into_balance(coins));
+
+        event::emit(DepositEvent {
+            user: @0x0,
+            amount,
+            ticket_id: @0x0,
+            luck_multiplier: 0,
+            total_pool: balance::value(&pool.balance),
+            timestamp: clock::timestamp_ms(clock),
+        });
+    }
+
+    // ============ View Functions ============
+
+    public fun is_whitelisted<T>(pool: &LotteryPool<T>, address: address): bool {
+        vec_set::contains(&pool.whitelist, &address)
+    }
+
+    public fun get_pool_balance<T>(pool: &LotteryPool<T>): u64 {
+        balance::value(&pool.balance)
+    }
+
+    public fun get_user_deposit<T>(pool: &LotteryPool<T>, user: address): u64 {
+        if (table::contains(&pool.user_deposits, user)) {
+            *table::borrow(&pool.user_deposits, user)
+        } else {
+            0
+        }
+    }
+
+    public fun get_luck_info(luck: &PlayerLuck): (u64, u64, u64, u64) {
+        (
+            luck.regular_luck_bps,
+            luck.regular_consecutive_losses,
+            luck.mega_luck_bps,
+            luck.mega_consecutive_losses
+        )
+    }
+}

@@ -1,0 +1,36 @@
+--- PoolRebalancer.ts.old
++++ PoolRebalancer.ts.new
+@@ -186,8 +186,30 @@
+         } catch (e) {
+           console.log('   💰 Now earning yield on NAVI!');
+         }
+-        // TRACKER UPDATE DISABLED - No longer needed since we query NAVI directly
+-        // (Old code tracked deposits but had stale data from tests)
++        
++        // Update SuilendTracker to reflect deposit
++        try {
++          const updateTx = new Transaction();
++          updateTx.moveCall({
++            target: `${process.env.VITE_PACKAGE_ID}::lottery_personal::admin_record_suilend_deposit`,
++            typeArguments: [process.env.VITE_USDC_TYPE],
++            arguments: [
++              updateTx.object(process.env.VITE_ADMIN_CAP_ID),
++              updateTx.object(this.poolObjectId),
++              updateTx.object(process.env.VITE_SUILEND_TRACKER_ID),
++              updateTx.pure.u64(Math.floor(amount * 1_000_000)),
++              updateTx.object(process.env.VITE_CLOCK_ID),
++            ],
++          });
++          
++          const result = await this.suiClient.signAndExecuteTransaction({
++            transaction: updateTx,
++            signer: this.keypair,
++            options: { showEffects: true },
++          });
++          
++          console.log('✅ Tracker updated:', result.digest);
++        } catch (e) {
++          console.error('⚠️  Failed to update tracker:', e);
++        }
+         console.log('✅ Successfully deposited to NAVI!');
+       } catch (error) {

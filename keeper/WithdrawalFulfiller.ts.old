@@ -1,0 +1,274 @@
+import { SuiClient, SuiEventFilter } from '@mysten/sui/client';
+import { Ed25519Keypair } from '@mysten/sui/keypairs/ed25519';
+import { Transaction } from '@mysten/sui/transactions';
+import { naviService } from './NaviService';
+
+interface WithdrawalRequest {
+  requestId: string;
+  user: string;
+  amount: number;
+  timestamp: string;
+}
+
+export class WithdrawalFulfiller {
+  private suiClient: SuiClient;
+  private keypair: Ed25519Keypair;
+  private packageId: string;
+  private poolObjectId: string;
+  private adminCapId: string;
+  private trackerSuilendId: string;
+  private isRunning = false;
+  private checkIntervalMs = 10000; // Check every 10 seconds
+
+  constructor(
+    suiClient: SuiClient,
+    keypair: Ed25519Keypair,
+    packageId: string,
+    poolObjectId: string,
+    adminCapId: string,
+    trackerSuilendId: string
+  ) {
+    this.suiClient = suiClient;
+    this.keypair = keypair;
+    this.packageId = packageId;
+    this.poolObjectId = poolObjectId;
+    this.adminCapId = adminCapId;
+    this.trackerSuilendId = trackerSuilendId;
+  }
+
+  async start(): Promise<void> {
+    if (this.isRunning) {
+      console.log('⚠️  WithdrawalFulfiller is already running');
+      return;
+    }
+
+    console.log('🔄 Starting Withdrawal Fulfiller...');
+    this.isRunning = true;
+
+    // Run initial check
+    await this.checkPendingWithdrawals();
+
+    // Set up interval
+    setInterval(async () => {
+      await this.checkPendingWithdrawals();
+    }, this.checkIntervalMs);
+
+    console.log('✅ Withdrawal Fulfiller started\n');
+  }
+
+  stop(): void {
+    this.isRunning = false;
+    console.log('🛑 Withdrawal Fulfiller stopped');
+  }
+
+  private async checkPendingWithdrawals(): Promise<void> {
+    try {
+      // Query recent withdrawal request events
+      const events = await this.suiClient.queryEvents({
+        query: {
+          MoveEventType: `${this.packageId}::lottery_personal::WithdrawalRequestedEvent`
+        },
+        limit: 50,
+        order: 'descending'
+      });
+
+      if (events.data.length === 0) {
+        return;
+      }
+
+      console.log(`📋 Found ${events.data.length} recent withdrawal requests`);
+
+      // Process each withdrawal request
+      for (const event of events.data) {
+        const data = event.parsedJson as any;
+        const request: WithdrawalRequest = {
+          requestId: data.request_id,
+          user: data.user,
+          amount: parseInt(data.amount) / 1_000_000,
+          timestamp: data.timestamp
+        };
+
+        // Check if this request still exists (not fulfilled)
+        const stillPending = await this.isRequestPending(request.requestId);
+        if (stillPending) {
+          console.log(`💸 Fulfilling withdrawal: $${request.amount.toFixed(2)} for ${request.user.slice(0, 8)}...`);
+          await this.fulfillWithdrawal(request);
+        }
+      }
+    } catch (error) {
+      console.error('❌ Error checking withdrawals:', error);
+    }
+  }
+
+  private async isRequestPending(requestId: string): Promise<boolean> {
+    try {
+      const obj = await this.suiClient.getObject({
+        id: requestId,
+        options: { showContent: true }
+      });
+      // If object exists and not deleted, it's pending
+      return obj.data !== null && obj.data !== undefined;
+    } catch {
+      return false;
+    }
+  }
+
+  private async fulfillWithdrawal(request: WithdrawalRequest): Promise<void> {
+    try {
+      // 1. Check pool balance
+      const poolObj = await this.suiClient.getObject({
+        id: this.poolObjectId,
+        options: { showContent: true }
+      });
+
+      const poolFields = (poolObj.data?.content as any)?.fields;
+      const poolBalance = parseInt(poolFields?.balance || '0') / 1_000_000;
+
+      console.log(`   Pool balance: $${poolBalance.toFixed(2)}, Need: $${request.amount.toFixed(2)}`);
+
+      // 2. If insufficient, withdraw from NAVI first
+      if (poolBalance < request.amount) {
+        const needFromNavi = request.amount - poolBalance + 0.001; // Add small buffer
+        console.log(`   ⚠️  Insufficient pool balance, withdrawing $${needFromNavi.toFixed(2)} from NAVI...`);
+        
+        await this.withdrawFromNaviToPool(needFromNavi);
+        
+        // Wait for transaction to finalize
+        await new Promise(resolve => setTimeout(resolve, 3000));
+      }
+
+      // 3. Fulfill the withdrawal
+      console.log(`   ✅ Fulfilling withdrawal request...`);
+      
+      const tx = new Transaction();
+      tx.moveCall({
+        target: `${this.packageId}::lottery_personal::admin_fulfill_withdrawal`,
+        typeArguments: [process.env.VITE_USDC_TYPE!],
+        arguments: [
+          tx.object(this.adminCapId),
+          tx.object(this.poolObjectId),
+          tx.object(request.requestId),
+          tx.object(process.env.VITE_CLOCK_ID!),
+        ],
+      });
+      tx.setGasBudget(100000000);
+
+      const result = await this.suiClient.signAndExecuteTransaction({
+        transaction: tx,
+        signer: this.keypair,
+        options: { showEffects: true },
+      });
+
+      console.log(`   ✅ Withdrawal fulfilled! TX: ${result.digest}`);
+      console.log(`   💰 Sent $${request.amount.toFixed(2)} to ${request.user.slice(0, 8)}...`);
+      console.log('');
+
+    } catch (error) {
+      console.error(`   ❌ Failed to fulfill withdrawal:`, error);
+    }
+  }
+
+  private async withdrawFromNaviToPool(amount: number): Promise<void> {
+    try {
+      // Withdraw from NAVI
+      const withdrawTx = await naviService.withdrawFromNavi(
+        this.keypair.toSuiAddress(),
+        amount
+      );
+
+      const result = await this.suiClient.signAndExecuteTransaction({
+        transaction: withdrawTx,
+        signer: this.keypair,
+        options: {
+          showEffects: true,
+          showObjectChanges: true,
+        },
+      });
+
+      console.log(`   ✅ Withdrew $${amount.toFixed(2)} from NAVI: ${result.digest}`);
+
+      // Wait for coins to be available
+      await new Promise(resolve => setTimeout(resolve, 5000));
+
+      // Find the withdrawn USDC coin
+      const coins = await this.suiClient.getCoins({
+        owner: this.keypair.toSuiAddress(),
+        coinType: process.env.VITE_USDC_TYPE!
+      });
+
+      const withdrawnCoin = coins.data.find(c => parseInt(c.balance) >= amount * 1_000_000 * 0.99);
+      
+      if (!withdrawnCoin) {
+        throw new Error('Could not find withdrawn USDC coin');
+      }
+
+      // Deposit back to pool
+      const depositTx = new Transaction();
+      depositTx.moveCall({
+        target: `${this.packageId}::lottery_personal::admin_deposit_from_suilend`,
+        typeArguments: [process.env.VITE_USDC_TYPE!],
+        arguments: [
+          depositTx.object(this.adminCapId),
+          depositTx.object(this.poolObjectId),
+          depositTx.object(withdrawnCoin.coinObjectId),
+          depositTx.object(process.env.VITE_CLOCK_ID!),
+        ],
+      });
+
+      await this.suiClient.signAndExecuteTransaction({
+        transaction: depositTx,
+        signer: this.keypair,
+        options: { showEffects: true },
+      });
+
+      console.log(`   ✅ Deposited $${amount.toFixed(2)} back to pool`);
+
+      // Update tracker
+      try {
+        const updateTx = new Transaction();
+        updateTx.moveCall({
+          target: `${this.packageId}::lottery_personal::admin_record_suilend_withdrawal`,
+          typeArguments: [process.env.VITE_USDC_TYPE!],
+          arguments: [
+            updateTx.object(this.adminCapId),
+            updateTx.object(this.trackerSuilendId),
+            updateTx.pure.u64(Math.floor(amount * 1_000_000)),
+            updateTx.object(process.env.VITE_CLOCK_ID!),
+          ],
+        });
+
+        const trackerResult = await this.suiClient.signAndExecuteTransaction({
+          transaction: updateTx,
+          signer: this.keypair,
+          options: { showEffects: true },
+        });
+
+        console.log(`   ✅ Tracker updated (withdrawal): ${trackerResult.digest}`);
+      } catch (e) {
+        console.error('   ⚠️  Failed to update tracker:', e);
+      }
+
+    } catch (error) {
+      console.error('   ❌ Error withdrawing from NAVI:', error);
+      throw error;
+    }
+  }
+}
+
+export function createWithdrawalFulfiller(
+  suiClient: SuiClient,
+  keypair: Ed25519Keypair,
+  packageId: string,
+  poolObjectId: string,
+  adminCapId: string,
+  trackerSuilendId: string
+): WithdrawalFulfiller {
+  return new WithdrawalFulfiller(
+    suiClient,
+    keypair,
+    packageId,
+    poolObjectId,
+    adminCapId,
+    trackerSuilendId
+  );
+}
